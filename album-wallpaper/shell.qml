@@ -21,6 +21,25 @@ import Quickshell.Services.Mpris
  *     back tracks don't flicker), restores the wallpaper you had
  *     before, via the same command.
  *
+ * PLAYER FILTERING
+ *   MPRIS has no "this is music, not video" flag — a browser tab
+ *   playing a YouTube video and a browser tab playing open.spotify.com
+ *   both show up under the same player identity (e.g. "Firefox").
+ *   There is no reliable way to distinguish them at the protocol
+ *   level. So instead this only reacts to players whose MPRIS
+ *   identity/desktopEntry matches the `allowedPlayers` whitelist
+ *   below, which defaults to the native Spotify client only.
+ *   Generic browsers are deliberately never matched, so YouTube (or
+ *   any other video played in a browser) will never trigger a
+ *   wallpaper change — even if you also listen to music in that same
+ *   browser.
+ *
+ *   To also allow another *native* music app (not a browser), add
+ *   its MPRIS identity or desktopEntry (lowercase, substring match)
+ *   to allowedPlayers, e.g. ["spotify", "vlc"] if you use VLC only
+ *   for audio. Do NOT add "firefox"/"chromium"/"chrome" etc. — that
+ *   reopens the YouTube problem.
+ *
  * REQUIRES
  *   - the `caelestia` CLI (ships with caelestia-shell)
  *   - `curl` on PATH, only for players whose MPRIS art url is remote
@@ -56,6 +75,12 @@ ShellRoot {
     property string wallpaperStateFile: (Quickshell.env("HOME") || "/tmp") + "/.local/state/caelestia/wallpaper/path.txt"
     property int keepCachedFiles: 20 // how many past songs' art to keep on disk
 
+    // Only players whose MPRIS identity or desktopEntry contains one of
+    // these (case-insensitive, substring match) will ever trigger a
+    // wallpaper change. Keep this to real music apps — never browsers —
+    // since MPRIS can't tell a music tab from a video tab.
+    property var allowedPlayers: ["spotify"]
+
     // ---------------- internal state — don't touch ----------------
     property string previousWallpaper: ""
     property bool wallpaperOverridden: false
@@ -82,10 +107,25 @@ ShellRoot {
         return artist + "_-_" + title + "_" + id + ".jpg";
     }
 
+    // Checks a player's MPRIS identity/desktopEntry against allowedPlayers.
+    // Substring + lowercase match so "Spotify" identity or a
+    // "spotify.desktop" desktopEntry both match an "spotify" entry.
+    function isAllowedPlayer(p) {
+        if (!p) return false;
+        const identity = (p.identity || "").toString().toLowerCase();
+        const desktopEntry = (p.desktopEntry || "").toString().toLowerCase();
+        for (const needle of allowedPlayers) {
+            const n = needle.toLowerCase();
+            if (n.length > 0 && (identity.indexOf(n) !== -1 || desktopEntry.indexOf(n) !== -1))
+                return true;
+        }
+        return false;
+    }
+
     readonly property var activePlayer: {
         const list = Mpris.players ? Mpris.players.values : [];
         for (const p of list) {
-            if (p.playbackState === MprisPlaybackState.Playing && p.trackArtUrl)
+            if (p.playbackState === MprisPlaybackState.Playing && p.trackArtUrl && isAllowedPlayer(p))
                 return p;
         }
         return null;
