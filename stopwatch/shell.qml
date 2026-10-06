@@ -1,73 +1,52 @@
-// shell.qml — standalone ChronoWidget (stopwatch / timer) for Hyprland,
-// built on plain Quickshell. Single-file version.
+// shell.qml — ChronoWidget (stopwatch / timer / counters) for Hyprland.
+// Standalone, single-file, plain Quickshell.
 //
-// Design notes vs. the original two-file version:
-//   - DRAG FIX: dragging used to write `posX`/`posY` into a
-//     PersistentProperties object on every single pixel of movement, which
-//     forces a disk write on every frame -> visible stutter. Now the drag
-//     target is a plain, non-persisted Item; the position is only written
-//     back to the persisted store once, when the drag finishes.
-//   - RESTYLE: matches Caelestia's MPRIS/media widget — Material 3
-//     tonal / filled icon buttons with hover + press state layers and
-//     shape-morphing corners, the same colour roles (primary,
-//     secondaryContainer, onSurfaceVariant ...) and no card border.
-//   - ICONS: no emoji or unicode glyphs. Every icon is a vector path drawn
-//     by the `Glyph` component and tinted from the scheme, so it always
-//     matches the theme and needs no icon font.
-//   - MERGE: ChronoWidget is now an inline `component` inside this file,
-//     so there's only one file to ship/copy.
-//   - KEYBOARD FIX: WlrKeyboardFocus was set to `None`, which tells the
-//     compositor this layer-surface should never receive keyboard input.
-//     That blocked the counters mode's TextInput fields from ever getting
-//     keystrokes routed to them, even though they'd take local focus on
-//     click. Switched to `OnDemand`, which grants keyboard focus only
-//     while something inside the surface (a TextInput) actually has
-//     active focus, and releases it the rest of the time — so typing
-//     works in the counter label/amount fields without the widget
-//     stealing focus from other windows while idle.
-//   - COUNTER PERSISTENCE: counters used to live only in a
-//     PersistentProperties field, which survives a live `qs` config
-//     reload but not a full `qs kill` or a reboot. They're now written
-//     as JSON to a real file (`$XDG_STATE_HOME/chrono-widget/counters.json`,
-//     falling back to `~/.local/state/chrono-widget/counters.json`) on
-//     every add/change/delete, and read back from that file on startup.
-//   - DRAG GLITCH FIX: the drag handlers never re-anchored their
-//     `pressX`/`pressY` reference point after each pointer move, so every
-//     `onPositionChanged` measured distance from the *original* press
-//     point rather than the last frame — and that ever-growing delta was
-//     then added on top of the already-updated position each time,
-//     compounding into runaway/jumpy movement. Dragging is now computed
-//     as a pure function of total displacement from a fixed press-time
-//     anchor (`setPosition(startLeft + dx, startTop + dy)`), so nothing
-//     compounds across events and the widget tracks the cursor 1:1 with
-//     no drift. The expanded panel is also now only draggable via its
-//     header row (the title/icon strip), not anywhere on the card —
-//     clicking the ring, controls, laps or counters no longer risks
-//     starting a drag.
-//
-// This is a fully standalone module — it does NOT hook into the Caelestia
-// shell. It only *optionally* reads the colour file that
-// `caelestia scheme set` writes to, purely as a theme source. If that file
-// doesn't exist, it falls back to a built-in dark palette.
+// WHAT CHANGED IN THIS REVISION
+//   - DRAGGING (the real fix): the layer surface is now full-screen and only
+//     the card is input-enabled (`mask: Region`). The card is a normal Item
+//     that moves inside a fixed window, so pointer coordinates (mapped to the
+//     window) never shift under your cursor. Result: 1:1 tracking, no jitter,
+//     no per-frame layer-shell reconfigure, no disk writes while dragging.
+//   - SMOOTHNESS: the old card was one big `layer.enabled` item with a blur
+//     shadow, so the whole widget was re-rendered into a texture every frame
+//     while the stopwatch ran. The shadow is now a few cheap static
+//     translucent rects behind the card, and the hover glow is a halo rect
+//     instead of a per-button MultiEffect.
+//   - LAYOUT: one spacing system (20 px card padding, 16 px between sections,
+//     8 px between buttons). Counter cards use a fixed inner layout
+//     (label row / trash on top, [-] ring [+] below) so nothing overlaps.
+//     The expand/collapse is animated on a fixed surface, and content is
+//     clipped + faded so it never spills outside the card mid-animation.
+//   - BUGS FIXED: counters could go below 0; changing page reset the counter
+//     view on every +/- click (now a simple page index); the timer ring drew
+//     the *elapsed* arc instead of the remaining one; the timer could not be
+//     restarted after finishing; adjusting a paused timer threw away the
+//     remaining time; mode-swap button made the header jump when hidden
+//     (now just disabled); counter text fields had no placeholder / Enter /
+//     Escape handling and the surface kept keyboard focus after typing.
+//   - PERSISTENCE: position, mode, pin state and timer length are saved to
+//     $XDG_STATE_HOME/chrono-widget/settings.json (debounced, only on
+//     release / change), counters to counters.json — survives `qs kill`
+//     and reboots.
+//   - EXTRAS: timer sends a desktop notification and blinks when done,
+//     collapsed icon shows a pulsing dot while running, laps show split +
+//     total, double-click a counter ring to reset it, mouse wheel / dots to
+//     page counters, Enter adds a counter, Escape leaves a text field.
 //
 // SETUP
-//   1. Put this file in its own directory:
-//        ~/.config/quickshell/chrono/shell.qml
-//   2. Run it standalone: qs -c chrono
-//   3. To start it with Hyprland, in your Hyprland config:
-//        exec-once = qs -c chrono
-//   4. To stop/reload just this widget:
-//        qs -c chrono kill
-//        qs -c chrono -d   (restart in the foreground, for debugging)
-//   5. For real background blur, add a Hyprland layer rule:
-//        layerrule = blur, chrono-widget
-//        layerrule = ignorezero, chrono-widget
-//   6. Delete/adjust the theme-file `path` in the FileView below if you're
-//      not using Caelestia, or point it at whatever colour-scheme JSON you use.
+//   1. Put this file at ~/.config/quickshell/chrono/shell.qml
+//   2. Run:           qs -c chrono
+//   3. Autostart:     exec-once = qs -c chrono        (Hyprland config)
+//   4. Debug/restart: qs -c chrono kill ; qs -c chrono -d
+//   5. Optional blur (namespace is "chrono-widget"):
+//        older Hyprland:  layerrule = blur, chrono-widget
+//                         layerrule = ignorezero, chrono-widget
+//        newer Hyprland:  layerrule = blur on, match:namespace chrono-widget
+//   6. Theme: reads ~/.local/state/caelestia/scheme.json if present (live
+//      reload), otherwise uses the built-in dark palette.
 
 import QtQuick
 import QtQuick.Shapes
-import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -144,7 +123,7 @@ ShellRoot {
         }
     }
 
-    // ---- Icon button: mirrors Caelestia's IconButton (Filled / Tonal / Text)
+    // ---- Icon button: Caelestia-style Filled / Tonal / Text -------------
     component IconBtn: Item {
         id: b
         required property var palette
@@ -165,33 +144,38 @@ ShellRoot {
             : (active ? palette.primary : palette.onSurfaceVariant)
 
         opacity: enabled ? 1 : 0.38
+        scale: pressed ? 0.94 : 1.0
+        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
 
-        readonly property color glowColor: b.kind === "filled" ? b.palette.primary : b.fgColor
-        property real glowOpacity: (ma.containsMouse && b.enabled) ? (b.kind === "filled" ? 0.85 : 0.55) : 0
-        Behavior on glowOpacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+        // hover amount 0..1 drives the halo (cheap glow, no shader effect)
+        property real hover: (ma.containsMouse && b.enabled) ? 1 : 0
+        Behavior on hover { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+
+        readonly property real haloScale: kind === "text" ? 0 : (kind === "filled" ? 1.0 : 0.6)
+        Rectangle {
+            anchors.fill: bg
+            anchors.margins: -4
+            radius: bg.radius + 4
+            color: b.bgColor
+            opacity: b.hover * b.haloScale * 0.14
+        }
+        Rectangle {
+            anchors.fill: bg
+            anchors.margins: -2
+            radius: bg.radius + 2
+            color: b.bgColor
+            opacity: b.hover * b.haloScale * 0.22
+        }
 
         Rectangle {
             id: bg
             anchors.fill: parent
             color: b.bgColor
-            radius: b.pressed ? 12 : b.checked ? 16 : b.height / 2
-            scale: b.pressed ? 0.92 : 1.0
+            radius: Math.min(b.height / 2, b.pressed ? 12 : (b.checked ? 16 : b.height / 2))
             Behavior on radius { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
             Behavior on color { ColorAnimation { duration: 150 } }
-            Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-
-            // smooth glow hugging the button's own shape, only visible on hover
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                shadowEnabled: true
-                shadowColor: Qt.rgba(b.glowColor.r, b.glowColor.g, b.glowColor.b, b.glowOpacity)
-                shadowBlur: 0.55
-                shadowScale: 1.0
-                shadowHorizontalOffset: 0
-                shadowVerticalOffset: 0
-            }
         }
-        // state layer (hover 8%, press 10%, same as Caelestia)
+        // state layer (hover 8%, press 10%)
         Rectangle {
             anchors.fill: parent
             radius: bg.radius
@@ -215,7 +199,7 @@ ShellRoot {
         }
     }
 
-    // ---- Small pill button (timer +/- steps, "Clear") -------------------
+    // ---- Small pill button (timer steps, "Clear") -----------------------
     component Chip: Item {
         id: c
         required property var palette
@@ -223,40 +207,29 @@ ShellRoot {
         property bool tonal: true
         signal clicked()
 
-        implicitWidth: txt.implicitWidth + 20
+        implicitWidth: txt.implicitWidth + 24
         implicitHeight: 24
         width: implicitWidth; height: implicitHeight
-
-        property real glowOpacity: cma.containsMouse ? 0.6 : 0
-        Behavior on glowOpacity { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+        scale: cma.pressed ? 0.95 : 1.0
+        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
 
         Rectangle {
-            id: chipBg
             anchors.fill: parent
             radius: height / 2
             color: c.tonal ? c.palette.secondaryContainer : "transparent"
-
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                shadowEnabled: true
-                shadowColor: Qt.rgba(c.palette.primary.r, c.palette.primary.g, c.palette.primary.b, c.glowOpacity)
-                shadowBlur: 0.5
-                shadowScale: 1.0
-                shadowHorizontalOffset: 0
-                shadowVerticalOffset: 0
-            }
         }
         Rectangle {
             anchors.fill: parent
             radius: height / 2
             color: c.tonal ? c.palette.onSecondaryContainer : c.palette.primary
-            opacity: cma.pressed ? 0.10 : cma.containsMouse ? 0.08 : 0
+            opacity: cma.pressed ? 0.12 : cma.containsMouse ? 0.08 : 0
+            Behavior on opacity { NumberAnimation { duration: 100 } }
         }
         Text {
             id: txt
             anchors.centerIn: parent
             text: c.label
-            color: c.palette.primary
+            color: c.tonal ? c.palette.onSecondaryContainer : c.palette.primary
             font.pixelSize: 11
             font.weight: Font.Medium
         }
@@ -269,213 +242,253 @@ ShellRoot {
         }
     }
 
-    // ---- Minimalist counter card: circular progress ring + tiny controls
+    // ---- Pill text field with placeholder + focus ring -------------------
+    component Field: Rectangle {
+        id: f
+        required property var palette
+        property string placeholder: ""
+        property bool digits: false
+        property int align: TextInput.AlignLeft
+        property alias text: input.text
+        signal accepted()
+        signal escaped()
+
+        function clear() { input.text = ""; }
+        function focusInput() { input.forceActiveFocus(); }
+
+        implicitHeight: 40
+        radius: height / 2
+        color: Qt.rgba(f.palette.primary.r, f.palette.primary.g, f.palette.primary.b, 0.10)
+        border.width: 1.5
+        border.color: input.activeFocus
+            ? Qt.rgba(f.palette.primary.r, f.palette.primary.g, f.palette.primary.b, 0.70)
+            : Qt.rgba(f.palette.primary.r, f.palette.primary.g, f.palette.primary.b, 0.0)
+        Behavior on border.color { ColorAnimation { duration: 140 } }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.IBeamCursor
+            onPressed: input.forceActiveFocus()
+        }
+
+        TextInput {
+            id: input
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            verticalAlignment: TextInput.AlignVCenter
+            horizontalAlignment: f.align
+            color: f.palette.primary
+            selectionColor: f.palette.primary
+            selectedTextColor: f.palette.onPrimary
+            font.pixelSize: 13
+            clip: true
+            selectByMouse: true
+            maximumLength: f.digits ? 6 : 24
+            inputMethodHints: f.digits ? Qt.ImhDigitsOnly : Qt.ImhNone
+            validator: RegularExpressionValidator {
+                regularExpression: f.digits ? /^[0-9]*$/ : /^.*$/
+            }
+            onAccepted: f.accepted()
+            Keys.onEscapePressed: f.escaped()
+
+            Text {
+                anchors.fill: parent
+                verticalAlignment: Text.AlignVCenter
+                horizontalAlignment: f.align
+                visible: input.text.length === 0
+                text: f.placeholder
+                color: Qt.rgba(f.palette.primary.r, f.palette.primary.g, f.palette.primary.b, 0.45)
+                font.pixelSize: 13
+                elide: Text.ElideRight
+            }
+        }
+    }
+
+    // ---- Counter card: [-]  (progress ring)  [+], label + delete on top --
     component CounterCard: Rectangle {
         id: cc
         required property var palette
-        property var entry   // { id, label, initial, remaining } or null for an empty slot
+        property var entry   // { id, label, initial, remaining } or null
         signal decrement()
         signal increment()
         signal remove()
+        signal reset()
+
+        readonly property real frac: (entry && entry.initial > 0) ? entry.remaining / entry.initial : 0
+        readonly property bool depleted: entry ? entry.remaining <= 0 : false
 
         radius: 18
-        color: Qt.rgba(cc.palette.primary.r, cc.palette.primary.g, cc.palette.primary.b, 0.08)
-        scale: hoverH.hovered ? 1.035 : 1.0
-        Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-
-        readonly property real frac: (cc.entry && cc.entry.initial > 0) ? cc.entry.remaining / cc.entry.initial : 0
+        color: Qt.rgba(palette.primary.r, palette.primary.g, palette.primary.b, hoverH.hovered ? 0.13 : 0.08)
+        border.width: 1
+        border.color: Qt.rgba(palette.primary.r, palette.primary.g, palette.primary.b, hoverH.hovered ? 0.30 : 0.10)
+        Behavior on color { ColorAnimation { duration: 140 } }
+        Behavior on border.color { ColorAnimation { duration: 140 } }
 
         HoverHandler { id: hoverH }
 
-        // subtle highlight border, brightens on hover — no glow/blur on the card itself
-        Rectangle {
-            anchors.fill: parent
-            radius: cc.radius
-            color: "transparent"
-            border.width: 1
-            border.color: Qt.rgba(cc.palette.primary.r, cc.palette.primary.g, cc.palette.primary.b, hoverH.hovered ? 0.38 : 0.12)
-            Behavior on border.color { ColorAnimation { duration: 160 } }
-        }
-
+        // top row: label (left) + delete (right) — label stops before the button
         IconBtn {
+            id: trashBtn
             palette: cc.palette
-            width: 22; height: 22
+            width: 24; height: 24
             anchors.top: parent.top
             anchors.right: parent.right
-            anchors.margins: 4
+            anchors.topMargin: 6
+            anchors.rightMargin: 6
             kind: "text"
             glyph: "trash"
-            glyphSize: 13
+            glyphSize: 14
             onClicked: cc.remove()
         }
+        Text {
+            anchors.left: parent.left
+            anchors.leftMargin: 14
+            anchors.right: trashBtn.left
+            anchors.rightMargin: 4
+            anchors.verticalCenter: trashBtn.verticalCenter
+            text: cc.entry ? cc.entry.label : ""
+            color: cc.palette.primary
+            font.pixelSize: 11
+            font.weight: Font.Medium
+            elide: Text.ElideRight
+        }
 
-        Column {
-            anchors.centerIn: parent
-            spacing: 4
-            width: parent.width - 16
+        // bottom row: [-] ring [+]
+        Item {
+            id: ring
+            width: 54; height: 54
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 12
 
+            property real sweep: cc.frac * 360
+            Behavior on sweep { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+
+            Shape {
+                anchors.fill: parent
+                layer.enabled: true
+                layer.samples: 4
+                ShapePath {
+                    strokeWidth: 5
+                    strokeColor: Qt.rgba(cc.palette.primary.r, cc.palette.primary.g, cc.palette.primary.b, 0.20)
+                    fillColor: "transparent"
+                    PathAngleArc { centerX: 27; centerY: 27; radiusX: 24.5; radiusY: 24.5; startAngle: -90; sweepAngle: 360 }
+                }
+                ShapePath {
+                    strokeWidth: 5
+                    strokeColor: ring.sweep > 0.5 ? cc.palette.primary : "transparent"
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    PathAngleArc { centerX: 27; centerY: 27; radiusX: 24.5; radiusY: 24.5; startAngle: -90; sweepAngle: ring.sweep }
+                }
+            }
             Text {
-                width: parent.width
-                text: cc.entry ? cc.entry.label : ""
-                color: cc.palette.primary
-                font.pixelSize: 10
-                font.weight: Font.Medium
+                anchors.centerIn: parent
+                width: 36; height: 24
                 horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
+                text: cc.entry ? String(cc.entry.remaining) : ""
+                color: cc.palette.primary
+                opacity: cc.depleted ? 0.5 : 1
+                font.pixelSize: 16
+                font.bold: true
+                fontSizeMode: Text.Fit
+                minimumPixelSize: 8
             }
-
-            Item {
-                width: 60; height: 60
-                anchors.horizontalCenter: parent.horizontalCenter
-
-                Shape {
-                    anchors.fill: parent
-                    layer.enabled: true
-                    layer.samples: 4
-                    ShapePath {
-                        strokeWidth: 5
-                        strokeColor: Qt.rgba(cc.palette.primary.r, cc.palette.primary.g, cc.palette.primary.b, 0.20)
-                        fillColor: "transparent"
-                        PathAngleArc { centerX: 30; centerY: 30; radiusX: 27; radiusY: 27; startAngle: -90; sweepAngle: 360 }
-                    }
-                    ShapePath {
-                        strokeWidth: 5
-                        strokeColor: cc.palette.primary
-                        fillColor: "transparent"
-                        capStyle: ShapePath.RoundCap
-                        PathAngleArc { centerX: 30; centerY: 30; radiusX: 27; radiusY: 27; startAngle: -90; sweepAngle: 360 * cc.frac }
-                    }
-                }
-                Text {
-                    anchors.centerIn: parent
-                    text: cc.entry ? String(cc.entry.remaining) : ""
-                    color: cc.palette.primary
-                    font.pixelSize: 16
-                    font.bold: true
-                }
+            MouseArea {
+                anchors.fill: parent
+                onDoubleClicked: cc.reset()
             }
-
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 10
-
-                IconBtn {
-                    palette: cc.palette
-                    width: 26; height: 26
-                    kind: "tonal"
-                    glyph: "minus"
-                    glyphSize: 14
-                    onClicked: cc.decrement()
-                }
-                IconBtn {
-                    palette: cc.palette
-                    width: 26; height: 26
-                    kind: "tonal"
-                    glyph: "plus"
-                    glyphSize: 14
-                    onClicked: cc.increment()
-                }
-            }
+        }
+        IconBtn {
+            palette: cc.palette
+            width: 28; height: 28
+            anchors.right: ring.left
+            anchors.rightMargin: 6
+            anchors.verticalCenter: ring.verticalCenter
+            kind: "tonal"
+            glyph: "minus"
+            glyphSize: 14
+            enabled: !cc.depleted
+            onClicked: cc.decrement()
+        }
+        IconBtn {
+            palette: cc.palette
+            width: 28; height: 28
+            anchors.left: ring.right
+            anchors.leftMargin: 6
+            anchors.verticalCenter: ring.verticalCenter
+            kind: "tonal"
+            glyph: "plus"
+            glyphSize: 14
+            enabled: cc.entry ? cc.entry.remaining < cc.entry.initial : false
+            onClicked: cc.increment()
         }
     }
 
     component ChronoWidget: PanelWindow {
         id: root
 
-        WlrLayershell.layer: WlrLayer.Background
+        // Bottom (not Background): Hyprland does not hand keyboard focus to
+        // Background-layer surfaces, so typing in the counter fields needs
+        // Bottom or above. Bottom still sits below normal windows.
+        WlrLayershell.layer: WlrLayer.Bottom
         WlrLayershell.exclusionMode: ExclusionMode.Ignore
-        // FIX: was WlrKeyboardFocus.None, which never routes keyboard
-        // input to this surface at all — that silently broke typing into
-        // the counters mode's TextInput fields. OnDemand grants keyboard
-        // focus only while something inside the surface (a TextInput)
-        // has active focus, and releases it otherwise.
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
         WlrLayershell.namespace: "chrono-widget"
 
+        // Full-screen, transparent, click-through everywhere except the card.
         color: "transparent"
+        anchors { top: true; bottom: true; left: true; right: true }
+        mask: Region { item: frame }
 
-        anchors {
-            top: true
-            left: true
-        }
-
-        // ---- persisted bits (survive a `qs -c` config reload) --------------
-        PersistentProperties {
+        // ---- settings (plain in-memory object; saved to disk on demand) ----
+        QtObject {
             id: mem
-            reloadableId: "chronoWidget"
-
             property real posX: 60
             property real posY: 60
-            property int mode: 0        // 0 = stopwatch, 1 = timer, 2 = counters
+            property int mode: 0            // 0 = stopwatch, 1 = timer, 2 = counters
             property bool pinned: false
             property int timerDurationMs: 5 * 60 * 1000
         }
 
-        // ---- position: bound to the persisted store, dragged by delta --------
-        margins.left: mem.posX
-        margins.top: mem.posY
-
-        // Drag options (off by default — same behaviour as before unless
-        // you turn clampToScreen on).
-        property bool clampToScreen: false
-        property int snapDistance: 14
-        property int edgeGap: 8
-
-        // Absolute positioning, computed fresh each call from whatever
-        // (l, t) is passed in — this is what dragging anchors to, so a
-        // drag is a pure function of total pointer displacement since
-        // press rather than a running sum of per-frame deltas. Any single
-        // event's coordinate quirk can't drift the position, because
-        // nothing is compounded across events.
-        function setPosition(l, t) {
-            if (clampToScreen && root.screen && root.screen.width > 0) {
-                var minL = edgeGap, maxL = root.screen.width - root.width - edgeGap;
-                var minT = edgeGap, maxT = root.screen.height - root.height - edgeGap;
-
-                if (Math.abs(l - minL) < snapDistance) l = minL;
-                if (Math.abs(l - maxL) < snapDistance) l = maxL;
-                if (Math.abs(t - minT) < snapDistance) t = minT;
-                if (Math.abs(t - maxT) < snapDistance) t = maxT;
-
-                l = Math.max(minL, Math.min(maxL, l));
-                t = Math.max(minT, Math.min(maxT, t));
-            }
-
-            root.margins.left = l;
-            root.margins.top = t;
-        }
-
-        // Relative move, kept for convenience — just delegates to setPosition.
-        function moveBy(dx, dy) {
-            setPosition(root.margins.left + dx, root.margins.top + dy);
-        }
-
-        function commitPosition() {
-            mem.posX = root.margins.left;
-            mem.posY = root.margins.top;
-        }
-
-        // ---- optional external colour scheme (Caelestia's scheme.json, or none) ----
+        // ---- paths -----------------------------------------------------------
         readonly property string stateDir:
             Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")
         readonly property string schemePath: stateDir + "/caelestia/scheme.json"
-
-        // ---- counters: persisted to a real file on disk, not just
-        // PersistentProperties (which only survives a live QML reload, not
-        // a full `qs kill` or a reboot). Written any time a counter is
-        // added, changed, reset or deleted; read back on startup.
-        readonly property string counterStateDir: stateDir + "/chrono-widget"
-        readonly property string counterStatePath: counterStateDir + "/counters.json"
+        readonly property string dataDir: stateDir + "/chrono-widget"
+        readonly property string countersPath: dataDir + "/counters.json"
+        readonly property string settingsPath: dataDir + "/settings.json"
 
         Process {
-            id: ensureCounterDir
-            command: ["mkdir", "-p", root.counterStateDir]
+            command: ["mkdir", "-p", root.dataDir]
             running: true
         }
 
         FileView {
+            id: settingsStore
+            path: root.settingsPath
+            watchChanges: false
+            onLoaded: {
+                try {
+                    var s = JSON.parse(text());
+                    if (typeof s.x === "number") mem.posX = s.x;
+                    if (typeof s.y === "number") mem.posY = s.y;
+                    if (typeof s.mode === "number" && s.mode >= 0 && s.mode <= 2) mem.mode = Math.floor(s.mode);
+                    if (typeof s.pinned === "boolean") mem.pinned = s.pinned;
+                    if (typeof s.timerMs === "number" && s.timerMs >= 0) mem.timerDurationMs = s.timerMs;
+                    root.tmRemainingMs = mem.timerDurationMs;
+                } catch (e) {
+                    console.warn("[chrono-widget] invalid settings.json:", e);
+                }
+            }
+            onLoadFailed: (error) => { /* first run: keep defaults */ }
+        }
+
+        FileView {
             id: counterStore
-            path: root.counterStatePath
+            path: root.countersPath
             watchChanges: false
             onLoaded: {
                 try {
@@ -486,15 +499,21 @@ ShellRoot {
                     root.counters = [];
                 }
             }
-            onLoadFailed: (error) => {
-                // No file yet (first run) — start with an empty list.
-                root.counters = [];
-            }
+            onLoadFailed: (error) => { root.counters = []; }
         }
 
+        function saveSettings() {
+            settingsStore.setText(JSON.stringify({
+                x: mem.posX, y: mem.posY, mode: mem.mode,
+                pinned: mem.pinned, timerMs: mem.timerDurationMs
+            }));
+        }
+        Timer { id: saveTimer; interval: 400; onTriggered: root.saveSettings() }
+        function scheduleSave() { saveTimer.restart(); }
+
+        // ---- theme -------------------------------------------------------------
         QtObject {
             id: pal
-            // Raw "colours" map from scheme.json (hex strings, no '#').
             property var sch: ({})
 
             function c(role, fallback) {
@@ -502,12 +521,8 @@ ShellRoot {
                 if (v === undefined || v === null || v === "") return fallback;
                 return v.toString().charAt(0) === "#" ? v : ("#" + v);
             }
-
-            // ---- theme polarity ---------------------------------------------
-            // Simple rule: dark card -> light text, light card -> dark text.
             function lum(col) { return 0.299 * col.r + 0.587 * col.g + 0.114 * col.b; }
 
-            // Raw roles straight from the scheme (or the fallback palette).
             property color background: c("background", "#1b1d24")
             property color surface: c("surfaceContainer", c("surface", "#232530"))
             property color surfaceHigh: c("surfaceContainerHigh", c("surfaceVariant", "#2b2e39"))
@@ -515,38 +530,23 @@ ShellRoot {
             property color secondary: c("secondary", "#bcc7dc")
             property color secondaryContainer: c("secondaryContainer", "#3d4759")
             property color rawPrimary: c("primary", "#a6c8ff")
+            property color error: c("error", "#ffb4ab")
 
-            // true when the card/disc surfaces are dark
             readonly property bool dark: lum(surface) < 0.5
 
-            // Text drawn straight on the card / disc / lap box.
-            // (all text now uses the accent colour instead — set below)
-
-            // Accent (icons, ring, "Clear"): keep the scheme hue, but make
-            // sure it is light enough on dark cards / dark enough on light ones.
+            // keep the scheme hue, but guarantee contrast against the card
             property color primary: dark
                 ? (lum(rawPrimary) >= 0.55 ? rawPrimary : Qt.lighter(rawPrimary, 1.0 + (0.55 - lum(rawPrimary)) * 3.5))
                 : (lum(rawPrimary) <= 0.4 ? rawPrimary : Qt.darker(rawPrimary, 1.0 + (lum(rawPrimary) - 0.4) * 3.5))
 
-            // Text on coloured buttons: pick by the button's own luminance.
             property color onPrimary: lum(primary) > 0.5 ? "#101015" : "#ffffff"
             property color onSecondary: lum(secondary) > 0.5 ? "#101015" : "#ffffff"
             property color onSecondaryContainer: lum(secondaryContainer) > 0.5 ? "#101015" : "#f4f4fa"
-
-            // Text = accent colour. Secondary text is the same accent, softened.
             property color onSurface: primary
             property color onSurfaceVariant: Qt.rgba(primary.r, primary.g, primary.b, 0.75)
-            property color muted: onSurfaceVariant
+            property color muted: Qt.rgba(primary.r, primary.g, primary.b, 0.60)
         }
 
-        // Watches the scheme file and reloads whenever `caelestia scheme
-        // set` (or the dynamic wallpaper-scheme writer) touches it, so
-        // every colour in `pal` updates live, in place, with no restart.
-        // Reading via onLoaded (rather than binding straight to a `text`
-        // property) means we only parse once the read has actually
-        // finished, and onLoadFailed gives us a clear signal — and a log
-        // line — when the file is missing instead of silently keeping
-        // stale colours forever.
         FileView {
             id: schemeFile
             path: root.schemePath
@@ -555,12 +555,8 @@ ShellRoot {
             onLoaded: {
                 try {
                     const data = JSON.parse(text());
-                    // Accept either `{ colours: {...} }` (Caelestia's
-                    // usual shape) or a flat `{ primary: ..., ... }` file.
                     pal.sch = (data && data.colours) ? data.colours : (data || {});
                 } catch (e) {
-                    // Can happen if we read mid-write; keep the last good
-                    // scheme, the next change event will fix it.
                     console.warn("[chrono-widget] could not parse scheme.json:", e);
                 }
             }
@@ -569,60 +565,65 @@ ShellRoot {
             }
         }
 
-        // ---- expand / collapse -----------------------------------------------
+        // ---- expand / collapse -------------------------------------------------
         property bool running: false
         property bool manualOpen: false
-
-        // Expansion is controlled only by the UI toggle/pin state.
-        // Starting, pausing, or resetting the stopwatch must not close it.
         property bool expanded: manualOpen || mem.pinned
 
-        implicitWidth: expanded ? 340 : 52
-        implicitHeight: expanded ? content.implicitHeight + 36 : 52
-        Behavior on implicitWidth { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-        Behavior on implicitHeight { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-
-        // ---- stopwatch state --------------------------------------------------
+        // ---- stopwatch state ---------------------------------------------------
         property real swStartedAt: 0
         property real swAccumMs: 0
         property real swElapsedMs: 0
         property var laps: []
+        readonly property var lapItems: {
+            var out = [];
+            for (var i = laps.length - 1; i >= 0; i--)
+                out.push({ n: i + 1, total: laps[i], delta: laps[i] - (i > 0 ? laps[i - 1] : 0) });
+            return out;
+        }
 
-        // ---- timer state --------------------------------------------------
+        // ---- timer state -------------------------------------------------------
         property real tmEndAt: 0
         property real tmRemainingMs: mem.timerDurationMs
         property bool tmFinished: false
-
-        // ---- persistent counters ---------------------------------------------
-        property var counters: []
-        property string newCounterLabel: ""
-        property int newCounterAmount: 10
-
-        function saveCounters() {
-            counterStore.setText(JSON.stringify(root.counters));
+        property real blink: 1
+        SequentialAnimation on blink {
+            running: root.tmFinished && mem.mode === 1
+            loops: Animation.Infinite
+            NumberAnimation { to: 0.3; duration: 550; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutSine }
         }
+
+        // ---- counters ----------------------------------------------------------
+        property var counters: []
+        property int counterPage: 0
+        readonly property int pageCount: Math.max(1, Math.ceil(counters.length / 4))
+        onCountersChanged: {
+            var pages = Math.max(1, Math.ceil(counters.length / 4));
+            counterPage = Math.max(0, Math.min(counterPage, pages - 1));
+        }
+
+        function saveCounters() { counterStore.setText(JSON.stringify(root.counters)); }
 
         function addCounter(label, amount) {
             label = (label || "").trim();
             amount = Math.max(1, Math.floor(Number(amount) || 0));
             if (!label) label = "Counter " + (root.counters.length + 1);
             var list = root.counters.slice();
-            list.push({
-                id: Date.now() + Math.random(),
-                label: label,
-                initial: amount,
-                remaining: amount
-            });
+            list.push({ id: Date.now() + Math.random(), label: label, initial: amount, remaining: amount });
             root.counters = list;
+            root.counterPage = Math.ceil(list.length / 4) - 1;   // jump to the new card
             saveCounters();
-            root.newCounterLabel = "";
-            root.newCounterAmount = 10;
         }
 
         function changeCounter(index, delta) {
             if (index < 0 || index >= root.counters.length) return;
             var list = root.counters.slice();
-            list[index].remaining = Math.min(list[index].initial, list[index].remaining + delta);
+            var o = list[index];
+            list[index] = {
+                id: o.id, label: o.label, initial: o.initial,
+                remaining: Math.max(0, Math.min(o.initial, o.remaining + delta))
+            };
             root.counters = list;
             saveCounters();
         }
@@ -630,7 +631,8 @@ ShellRoot {
         function resetCounter(index) {
             if (index < 0 || index >= root.counters.length) return;
             var list = root.counters.slice();
-            list[index].remaining = list[index].initial;
+            var o = list[index];
+            list[index] = { id: o.id, label: o.label, initial: o.initial, remaining: o.initial };
             root.counters = list;
             saveCounters();
         }
@@ -643,6 +645,15 @@ ShellRoot {
             saveCounters();
         }
 
+        function submitCounter() {
+            var amt = parseInt(amountField.text);
+            if (!(amt > 0)) amt = 10;
+            addCounter(labelField.text, amt);
+            labelField.clear();
+            labelField.focusInput();
+        }
+
+        // ---- clock -------------------------------------------------------------
         Timer {
             interval: 16
             running: root.running
@@ -656,6 +667,8 @@ ShellRoot {
                         root.tmRemainingMs = 0;
                         root.running = false;
                         root.tmFinished = true;
+                        Quickshell.execDetached(["notify-send", "-a", "Chrono", "Timer finished",
+                                                 root.fmt(mem.timerDurationMs, mem.timerDurationMs >= 3600000).split(".")[0]]);
                     } else {
                         root.tmRemainingMs = rem;
                     }
@@ -676,18 +689,20 @@ ShellRoot {
             if (mem.mode === 2) return;
             if (mem.mode === 0) {
                 if (root.running) {
-                    root.swAccumMs = root.swElapsedMs;
+                    root.swAccumMs += Date.now() - root.swStartedAt;
+                    root.swElapsedMs = root.swAccumMs;
                     root.running = false;
                 } else {
                     root.swStartedAt = Date.now();
                     root.running = true;
                 }
             } else {
-                if (root.tmRemainingMs <= 0) return;
                 if (root.running) {
-                    root.tmRemainingMs = root.tmEndAt - Date.now();
+                    root.tmRemainingMs = Math.max(0, root.tmEndAt - Date.now());
                     root.running = false;
                 } else {
+                    if (mem.timerDurationMs <= 0) return;
+                    if (root.tmRemainingMs <= 0) root.tmRemainingMs = mem.timerDurationMs;  // restart after finish
                     root.tmFinished = false;
                     root.tmEndAt = Date.now() + root.tmRemainingMs;
                     root.running = true;
@@ -712,372 +727,501 @@ ShellRoot {
             root.laps = l;
         }
 
+        // Changes the timer length; keeps whatever progress a paused timer has.
         function adjustTimer(deltaMs) {
             if (mem.mode !== 1 || root.running) return;
-            mem.timerDurationMs = Math.max(0, Math.min(99 * 3600000, mem.timerDurationMs + deltaMs));
-            root.tmRemainingMs = mem.timerDurationMs;
+            var oldDur = mem.timerDurationMs;
+            var newDur = Math.max(0, Math.min(99 * 3600000, oldDur + deltaMs));
+            var applied = newDur - oldDur;
+            mem.timerDurationMs = newDur;
+            root.tmRemainingMs = Math.max(0, Math.min(newDur, root.tmRemainingMs + applied));
+            root.tmFinished = false;
+            scheduleSave();
         }
 
-        // ================= UI =================
-        Rectangle {
-            id: card
-            anchors.fill: parent
-            radius: root.expanded ? 24 : height / 2
-            color: Qt.rgba(pal.surface.r, pal.surface.g, pal.surface.b, 0.97)
-            border.width: 1
-            border.color: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.10)
-            Behavior on radius { NumberAnimation { duration: 160 } }
+        function cycleMode() {
+            if (root.running) return;
+            mem.mode = (mem.mode + 1) % 3;
+            card.forceActiveFocus();
+            scheduleSave();
+        }
 
-            layer.enabled: true
-            layer.effect: MultiEffect {
-                shadowEnabled: true
-                shadowColor: Qt.rgba(0, 0, 0, 0.45)
-                shadowBlur: 0.7
-                shadowVerticalOffset: 3
-                shadowHorizontalOffset: 0
+        // Absolute position with edge snapping, in window coordinates.
+        function setPosition(l, t) {
+            var gap = frame.gap, snap = frame.snap;
+            var maxL = root.width - frame.width - gap;
+            var maxT = root.height - frame.height - gap;
+            if (Math.abs(l - gap) < snap) l = gap;
+            if (Math.abs(l - maxL) < snap) l = maxL;
+            if (Math.abs(t - gap) < snap) t = gap;
+            if (Math.abs(t - maxT) < snap) t = maxT;
+            mem.posX = Math.max(gap, Math.min(maxL, l));
+            mem.posY = Math.max(gap, Math.min(maxT, t));
+        }
+
+        // ============================ UI ====================================
+        Item {
+            id: frame
+            readonly property int gap: 8      // min distance to screen edges
+            readonly property int snap: 14    // edge snap distance
+            readonly property int pad: 20     // card inner padding
+
+            width: root.expanded ? 340 : 56
+            height: root.expanded ? content.implicitHeight + pad * 2 : 56
+            Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+            Behavior on height { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+
+            // Displayed position is clamped to the screen, so expanding near an
+            // edge slides the card inwards (and back again when collapsed)
+            // without touching the saved position.
+            x: root.width > 0 ? Math.max(gap, Math.min(mem.posX, root.width - width - gap)) : mem.posX
+            y: root.height > 0 ? Math.max(gap, Math.min(mem.posY, root.height - height - gap)) : mem.posY
+
+            // soft static shadow: a few translucent rects, no shader / texture
+            Repeater {
+                model: 5
+                delegate: Rectangle {
+                    required property int index
+                    anchors.fill: parent
+                    anchors.margins: -(index + 1) * 3
+                    anchors.topMargin: -(index + 1) * 3 + 5
+                    anchors.bottomMargin: -(index + 1) * 3 - 5
+                    radius: card.radius + (index + 1) * 3
+                    color: Qt.rgba(0, 0, 0, 0.055)
+                }
             }
 
-            // faint top-light / bottom-shade sheen for a touch of depth
             Rectangle {
+                id: card
                 anchors.fill: parent
-                radius: card.radius
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.05) }
-                    GradientStop { position: 0.5; color: Qt.rgba(1, 1, 1, 0.0) }
-                    GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.06) }
-                }
-            }
+                radius: root.expanded ? 26 : height / 2
+                color: Qt.rgba(pal.surface.r, pal.surface.g, pal.surface.b, 0.97)
+                border.width: 1
+                border.color: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.10)
+                Behavior on radius { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
 
-            // ---------------- collapsed icon ----------------
-            MouseArea {
-                anchors.fill: parent
-                visible: !root.expanded
-                enabled: !root.expanded && !mem.pinned
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-
-                property real pressX: 0
-                property real pressY: 0
-                property real travel: 0   // total pointer travel, to tell a click from a drag
-                property real startLeft: 0
-                property real startTop: 0
-
-                onPressed: (mouse) => {
-                    pressX = mouse.x; pressY = mouse.y; travel = 0;
-                    startLeft = root.margins.left;
-                    startTop = root.margins.top;
-                }
-                onPositionChanged: (mouse) => {
-                    if (!pressed) return;
-                    var dx = mouse.x - pressX, dy = mouse.y - pressY;
-                    travel = Math.abs(dx) + Math.abs(dy);
-                    // always computed from the fixed press-time anchor, so
-                    // the widget tracks total cursor displacement 1:1 with
-                    // no per-frame drift.
-                    root.setPosition(startLeft + dx, startTop + dy);
-                }
-                onReleased: {
-                    root.commitPosition();
-                    if (travel <= 4) root.manualOpen = !root.manualOpen;
+                // clicking empty card space drops keyboard focus from text fields
+                MouseArea {
+                    anchors.fill: parent
+                    onPressed: card.forceActiveFocus()
                 }
 
+                // faint top-light / bottom-shade sheen
                 Rectangle {
                     anchors.fill: parent
                     radius: card.radius
-                    color: pal.primary
-                    opacity: parent.pressed ? 0.10 : parent.containsMouse ? 0.08 : 0
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Qt.rgba(1, 1, 1, 0.05) }
+                        GradientStop { position: 0.5; color: Qt.rgba(1, 1, 1, 0.0) }
+                        GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.06) }
+                    }
                 }
-                Glyph {
-                    anchors.centerIn: parent
-                    name: mem.mode === 0 ? "stopwatch" : (mem.mode === 1 ? "hourglass" : "counter")
-                    color: pal.primary
-                    size: 24
-                }
-            }
 
-            // ---------------- expanded panel ----------------
-            Column {
-                id: content
-                visible: root.expanded
-                anchors.fill: parent
-                anchors.margins: 18
-                spacing: 14
-
-                // header — also doubles as the drag handle for the expanded panel
+                // ---------------- collapsed icon ----------------
                 Item {
-                    width: parent.width
-                    height: 32
+                    anchors.fill: parent
+                    opacity: root.expanded ? 0 : 1
+                    visible: opacity > 0.01
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: card.radius
+                        color: pal.primary
+                        opacity: collapsedArea.pressed ? 0.10 : collapsedArea.containsMouse ? 0.08 : 0
+                        Behavior on opacity { NumberAnimation { duration: 100 } }
+                    }
+                    Glyph {
+                        anchors.centerIn: parent
+                        name: mem.mode === 0 ? "stopwatch" : (mem.mode === 1 ? "hourglass" : "counter")
+                        color: pal.primary
+                        size: 24
+                    }
+                    // running indicator
+                    Rectangle {
+                        x: 38; y: 9
+                        width: 9; height: 9; radius: 5
+                        color: root.tmFinished ? pal.error : pal.primary
+                        border.width: 2
+                        border.color: pal.surface
+                        visible: root.running || root.tmFinished
+                        opacity: root.tmFinished ? root.blink : 1
+                        SequentialAnimation on opacity {
+                            running: root.running
+                            loops: Animation.Infinite
+                            NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
 
                     MouseArea {
-                        id: headerDrag
+                        id: collapsedArea
                         anchors.fill: parent
-                        enabled: !mem.pinned
-                        z: -1
-                        cursorShape: Qt.SizeAllCursor
+                        enabled: !root.expanded
+                        hoverEnabled: true
+                        cursorShape: (pressed && travel > 4) ? Qt.ClosedHandCursor : Qt.PointingHandCursor
 
-                        property real pressX: 0
-                        property real pressY: 0
-                        property real startLeft: 0
-                        property real startTop: 0
+                        property real pressSX: 0
+                        property real pressSY: 0
+                        property real startX: 0
+                        property real startY: 0
+                        property real travel: 0
 
                         onPressed: (mouse) => {
-                            pressX = mouse.x; pressY = mouse.y;
-                            startLeft = root.margins.left;
-                            startTop = root.margins.top;
+                            var p = mapToItem(null, mouse.x, mouse.y);   // window coords: stable while dragging
+                            pressSX = p.x; pressSY = p.y;
+                            startX = frame.x; startY = frame.y;
+                            travel = 0;
                         }
                         onPositionChanged: (mouse) => {
                             if (!pressed) return;
-                            // computed from the fixed press-time anchor —
-                            // see the note on the collapsed-icon handler.
-                            root.setPosition(startLeft + (mouse.x - pressX), startTop + (mouse.y - pressY));
+                            var p = mapToItem(null, mouse.x, mouse.y);
+                            var dx = p.x - pressSX, dy = p.y - pressSY;
+                            travel = Math.max(travel, Math.abs(dx) + Math.abs(dy));
+                            if (travel > 4) root.setPosition(startX + dx, startY + dy);
                         }
-                        onReleased: root.commitPosition()
-                    }
-
-                    Row {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 8
-                        Glyph {
-                            anchors.verticalCenter: parent.verticalCenter
-                            name: mem.mode === 0 ? "stopwatch" : (mem.mode === 1 ? "hourglass" : "counter")
-                            color: pal.primary
-                            size: 20
-                        }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: mem.mode === 0 ? "Stopwatch" : (mem.mode === 1 ? "Timer" : "Counters")
-                            color: pal.primary
-                            font.pixelSize: 16
-                            font.weight: Font.Medium
-                            font.letterSpacing: 0.3
-                        }
-                    }
-
-                    Row {
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2
-
-                        IconBtn {
-                            palette: pal
-                            width: 32; height: 32
-                            kind: "text"; toggle: true
-                            glyph: "pin"; glyphSize: 20
-                            checked: mem.pinned
-                            onClicked: mem.pinned = !mem.pinned
-                        }
-                        IconBtn {
-                            palette: pal
-                            width: 32; height: 32
-                            kind: "text"
-                            glyph: "swap"; glyphSize: 20
-                            visible: !root.running
-                            onClicked: mem.mode = mem.mode === 0 ? 1 : (mem.mode === 1 ? 2 : 0)
-                        }
-                        IconBtn {
-                            palette: pal
-                            width: 32; height: 32
-                            kind: "text"
-                            glyph: "chevron"; glyphSize: 20
-                            onClicked: { root.manualOpen = false; mem.pinned = false }
+                        onReleased: {
+                            if (travel > 4) root.scheduleSave();
+                            else root.manualOpen = true;
                         }
                     }
                 }
 
-                // ---- stopwatch / timer / counters -----------------------------
+                // ---------------- expanded panel ----------------
                 Item {
-                    width: parent.width
-                    height: mem.mode === 2 ? 300 : 196
-
-                    Shape {
-                        id: ring
-                        anchors.centerIn: parent
-                        width: 188; height: 188
-                        visible: mem.mode !== 2
-                        layer.enabled: true
-                        layer.samples: 4
-                        property real frac: mem.mode === 0
-                            ? ((root.swElapsedMs % 60000) / 60000)
-                            : (mem.timerDurationMs > 0 ? root.tmRemainingMs / mem.timerDurationMs : 0)
-                        ShapePath {
-                            strokeWidth: 6
-                            strokeColor: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.22)
-                            fillColor: "transparent"
-                            PathAngleArc {
-                                centerX: 94; centerY: 94
-                                radiusX: 91; radiusY: 91
-                                startAngle: -90; sweepAngle: 360
-                            }
-                        }
-                        ShapePath {
-                            strokeWidth: 6
-                            strokeColor: pal.primary
-                            fillColor: "transparent"
-                            capStyle: ShapePath.RoundCap
-                            PathAngleArc {
-                                centerX: 94; centerY: 94
-                                radiusX: 91; radiusY: 91
-                                startAngle: -90
-                                sweepAngle: mem.mode === 0 ? 360 * ring.frac : -360 * (1 - ring.frac)
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 168; height: 168; radius: 84
-                        color: pal.surfaceHigh
-                        visible: mem.mode !== 2
-                    }
-
-                    Column {
-                        anchors.centerIn: parent
-                        spacing: 8
-                        visible: mem.mode !== 2
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            width: 134
-                            horizontalAlignment: Text.AlignHCenter
-                            text: mem.mode === 0 ? root.fmt(root.swElapsedMs, root.swElapsedMs >= 3600000) : root.fmt(root.tmRemainingMs, mem.timerDurationMs >= 3600000)
-                            color: pal.primary
-                            font.pixelSize: 30
-                            font.bold: true
-                            font.family: "monospace"
-                            fontSizeMode: Text.Fit
-                            minimumPixelSize: 16
-                        }
-                        Row {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            spacing: 6
-                            visible: mem.mode === 1 && !root.running
-                            Column {
-                                spacing: 4
-                                Chip { palette: pal; width: 46; label: "+1m"; onClicked: root.adjustTimer(60000) }
-                                Chip { palette: pal; width: 46; label: "−1m"; onClicked: root.adjustTimer(-60000) }
-                            }
-                            Column {
-                                spacing: 4
-                                Chip { palette: pal; width: 46; label: "+10s"; onClicked: root.adjustTimer(10000) }
-                                Chip { palette: pal; width: 46; label: "−10s"; onClicked: root.adjustTimer(-10000) }
-                            }
+                    id: panel
+                    anchors.fill: parent
+                    clip: true
+                    opacity: root.expanded ? 1 : 0
+                    visible: opacity > 0.01
+                    Behavior on opacity {
+                        SequentialAnimation {
+                            PauseAnimation { duration: root.expanded ? 90 : 0 }
+                            NumberAnimation { duration: root.expanded ? 160 : 80 }
                         }
                     }
 
                     Column {
-                        anchors.fill: parent
-                        spacing: 8
-                        visible: mem.mode === 2
+                        id: content
+                        x: frame.pad
+                        y: frame.pad
+                        width: 300
+                        spacing: 16
 
-                        Row {
+                        // ---- header (also the drag handle) ----
+                        Item {
                             width: parent.width
-                            height: 38
-                            spacing: 6
+                            height: 36
 
-                            TextInput {
-                                id: counterLabelInput
-                                width: parent.width - 112
-                                height: 38
-                                text: root.newCounterLabel
-                                color: pal.primary
-                                font.pixelSize: 13
-                                verticalAlignment: TextInput.AlignVCenter
-                                leftPadding: 12
-                                rightPadding: 12
-                                clip: true
-                                selectByMouse: true
-                                activeFocusOnPress: true
-                                onTextChanged: root.newCounterLabel = text
-                                Rectangle {
-                                    anchors.fill: parent
-                                    z: -1
-                                    radius: 19
-                                    color: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.10)
+                            MouseArea {
+                                id: headerDrag
+                                anchors.fill: parent
+                                enabled: !mem.pinned
+                                cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+
+                                property real pressSX: 0
+                                property real pressSY: 0
+                                property real startX: 0
+                                property real startY: 0
+
+                                onPressed: (mouse) => {
+                                    card.forceActiveFocus();
+                                    var p = mapToItem(null, mouse.x, mouse.y);
+                                    pressSX = p.x; pressSY = p.y;
+                                    startX = frame.x; startY = frame.y;
+                                }
+                                onPositionChanged: (mouse) => {
+                                    if (!pressed) return;
+                                    var p = mapToItem(null, mouse.x, mouse.y);
+                                    root.setPosition(startX + (p.x - pressSX), startY + (p.y - pressSY));
+                                }
+                                onReleased: root.scheduleSave()
+                            }
+
+                            Row {
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 10
+                                Glyph {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: mem.mode === 0 ? "stopwatch" : (mem.mode === 1 ? "hourglass" : "counter")
+                                    color: pal.primary
+                                    size: 20
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: mem.mode === 0 ? "Stopwatch" : (mem.mode === 1 ? "Timer" : "Counters")
+                                    color: pal.primary
+                                    font.pixelSize: 16
+                                    font.weight: Font.Medium
+                                    font.letterSpacing: 0.3
                                 }
                             }
 
-                            TextInput {
-                                id: counterAmountInput
-                                width: 48
-                                height: 38
-                                text: String(root.newCounterAmount)
-                                color: pal.primary
-                                font.pixelSize: 13
-                                horizontalAlignment: TextInput.AlignHCenter
-                                verticalAlignment: TextInput.AlignVCenter
-                                inputMethodHints: Qt.ImhDigitsOnly
-                                validator: IntValidator { bottom: 1; top: 999999 }
-                                activeFocusOnPress: true
-                                onEditingFinished: root.newCounterAmount = Math.max(1, parseInt(text) || 1)
-                                Rectangle {
+                            Row {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 2
+
+                                IconBtn {
+                                    palette: pal
+                                    width: 32; height: 32
+                                    kind: "text"; toggle: true
+                                    glyph: "pin"; glyphSize: 20
+                                    checked: mem.pinned
+                                    onClicked: { mem.pinned = !mem.pinned; root.scheduleSave(); }
+                                }
+                                IconBtn {
+                                    palette: pal
+                                    width: 32; height: 32
+                                    kind: "text"
+                                    glyph: "swap"; glyphSize: 20
+                                    enabled: !root.running
+                                    onClicked: root.cycleMode()
+                                }
+                                IconBtn {
+                                    palette: pal
+                                    width: 32; height: 32
+                                    kind: "text"
+                                    glyph: "chevron"; glyphSize: 20
+                                    onClicked: {
+                                        card.forceActiveFocus();
+                                        root.manualOpen = false;
+                                        mem.pinned = false;
+                                        root.scheduleSave();
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---- body: stopwatch / timer / counters ----
+                        Item {
+                            id: body
+                            width: parent.width
+                            height: mem.mode === 2 ? 282 : 196
+
+                            // --- ring + disc (stopwatch / timer) ---
+                            Item {
+                                id: dial
+                                anchors.centerIn: parent
+                                width: 188; height: 188
+                                visible: mem.mode !== 2
+
+                                Shape {
+                                    id: ring
                                     anchors.fill: parent
-                                    z: -1
-                                    radius: 19
+                                    layer.enabled: true
+                                    layer.samples: 4
+                                    // stopwatch: sweeps once per minute; timer: shows time remaining
+                                    property real frac: mem.mode === 0
+                                        ? ((root.swElapsedMs % 60000) / 60000)
+                                        : (mem.timerDurationMs > 0 ? root.tmRemainingMs / mem.timerDurationMs : 0)
+                                    ShapePath {
+                                        strokeWidth: 6
+                                        strokeColor: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.22)
+                                        fillColor: "transparent"
+                                        PathAngleArc {
+                                            centerX: 94; centerY: 94
+                                            radiusX: 91; radiusY: 91
+                                            startAngle: -90; sweepAngle: 360
+                                        }
+                                    }
+                                    ShapePath {
+                                        strokeWidth: 6
+                                        strokeColor: ring.frac * 360 > 0.5
+                                            ? (root.tmFinished && mem.mode === 1 ? pal.error : pal.primary)
+                                            : "transparent"
+                                        fillColor: "transparent"
+                                        capStyle: ShapePath.RoundCap
+                                        PathAngleArc {
+                                            centerX: 94; centerY: 94
+                                            radiusX: 91; radiusY: 91
+                                            startAngle: -90
+                                            sweepAngle: 360 * ring.frac
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: disc
+                                    anchors.centerIn: parent
+                                    width: 168; height: 168; radius: 84
                                     color: pal.surfaceHigh
+
+                                    readonly property bool editing: mem.mode === 1 && !root.running
+
+                                    Text {
+                                        id: timeText
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.verticalCenterOffset: disc.editing ? -22 : 0
+                                        Behavior on anchors.verticalCenterOffset {
+                                            NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                                        }
+                                        width: 122; height: 38
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: mem.mode === 0
+                                            ? root.fmt(root.swElapsedMs, root.swElapsedMs >= 3600000)
+                                            : root.fmt(root.tmRemainingMs, mem.timerDurationMs >= 3600000)
+                                        color: (root.tmFinished && mem.mode === 1) ? pal.error : pal.primary
+                                        opacity: (root.tmFinished && mem.mode === 1) ? root.blink : 1
+                                        font.pixelSize: 30
+                                        font.bold: true
+                                        font.family: "monospace"
+                                        fontSizeMode: Text.Fit
+                                        minimumPixelSize: 14
+                                    }
+
+                                    // timer step chips: 2x2, fade out while running
+                                    Grid {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        y: 100
+                                        columns: 2
+                                        spacing: 4
+                                        opacity: disc.editing ? 1 : 0
+                                        visible: opacity > 0.01 && mem.mode === 1
+                                        Behavior on opacity { NumberAnimation { duration: 160 } }
+
+                                        Chip { palette: pal; width: 44; height: 22; label: "+1m"; onClicked: root.adjustTimer(60000) }
+                                        Chip { palette: pal; width: 44; height: 22; label: "+10s"; onClicked: root.adjustTimer(10000) }
+                                        Chip { palette: pal; width: 44; height: 22; label: "−1m"; onClicked: root.adjustTimer(-60000) }
+                                        Chip { palette: pal; width: 44; height: 22; label: "−10s"; onClicked: root.adjustTimer(-10000) }
+                                    }
                                 }
                             }
 
-                            Chip {
-                                palette: pal
-                                width: 50
-                                height: 38
-                                label: "Add"
-                                onClicked: root.addCounter(counterLabelInput.text, counterAmountInput.text)
-                            }
-                        }
+                            // --- counters ---
+                            Column {
+                                anchors.fill: parent
+                                spacing: 10
+                                visible: mem.mode === 2
 
-                        // Paged 2x2 grid of counter cards — up to 4 cards
-                        // per page, extra counters scroll to further pages
-                        // with one-page-at-a-time snapping.
-                        ListView {
-                            id: counterPagesView
-                            width: parent.width
-                            height: 238
-                            clip: true
-                            orientation: ListView.Horizontal
-                            snapMode: ListView.SnapOneItem
-                            highlightRangeMode: ListView.StrictlyEnforceRange
-                            preferredHighlightBegin: 0
-                            preferredHighlightEnd: width
-                            boundsBehavior: Flickable.StopAtBounds
-                            model: {
-                                var pages = [];
-                                for (var i = 0; i < root.counters.length; i += 4)
-                                    pages.push(root.counters.slice(i, i + 4));
-                                if (pages.length === 0) pages.push([]);
-                                return pages;
-                            }
-                            delegate: Item {
-                                id: pageItem
-                                required property var modelData
-                                required property int index
-                                width: counterPagesView.width
-                                height: counterPagesView.height
+                                // add row: label | amount | add
+                                Row {
+                                    width: parent.width
+                                    height: 40
+                                    spacing: 8
 
-                                Grid {
-                                    anchors.fill: parent
-                                    columns: 2
-                                    rows: 2
-                                    columnSpacing: 8
-                                    rowSpacing: 8
+                                    Field {
+                                        id: labelField
+                                        palette: pal
+                                        width: parent.width - 56 - 40 - 16
+                                        height: 40
+                                        placeholder: "Counter name"
+                                        onAccepted: root.submitCounter()
+                                        onEscaped: card.forceActiveFocus()
+                                    }
+                                    Field {
+                                        id: amountField
+                                        palette: pal
+                                        width: 56
+                                        height: 40
+                                        digits: true
+                                        align: TextInput.AlignHCenter
+                                        placeholder: "10"
+                                        text: "10"
+                                        onAccepted: root.submitCounter()
+                                        onEscaped: card.forceActiveFocus()
+                                    }
+                                    IconBtn {
+                                        palette: pal
+                                        width: 40; height: 40
+                                        kind: "filled"
+                                        glyph: "plus"
+                                        glyphSize: 20
+                                        onClicked: root.submitCounter()
+                                    }
+                                }
+
+                                // 2x2 page of counter cards
+                                Item {
+                                    id: gridArea
+                                    width: parent.width
+                                    height: 214
+
+                                    WheelHandler {
+                                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                                        onWheel: (event) => {
+                                            if (event.angleDelta.y < 0)
+                                                root.counterPage = Math.min(root.pageCount - 1, root.counterPage + 1);
+                                            else if (event.angleDelta.y > 0)
+                                                root.counterPage = Math.max(0, root.counterPage - 1);
+                                        }
+                                    }
+
+                                    Grid {
+                                        anchors.fill: parent
+                                        columns: 2
+                                        spacing: 8
+
+                                        Repeater {
+                                            model: 4
+                                            delegate: Item {
+                                                id: slot
+                                                required property int index
+                                                width: (gridArea.width - 8) / 2
+                                                height: (gridArea.height - 8) / 2
+
+                                                readonly property int globalIndex: root.counterPage * 4 + slot.index
+                                                readonly property var entry: root.counters[slot.globalIndex] || null
+
+                                                Rectangle {
+                                                    anchors.fill: parent
+                                                    radius: 18
+                                                    visible: slot.entry === null
+                                                    color: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.035)
+                                                }
+                                                CounterCard {
+                                                    anchors.fill: parent
+                                                    visible: slot.entry !== null
+                                                    palette: pal
+                                                    entry: slot.entry
+                                                    onDecrement: root.changeCounter(slot.globalIndex, -1)
+                                                    onIncrement: root.changeCounter(slot.globalIndex, 1)
+                                                    onReset: root.resetCounter(slot.globalIndex)
+                                                    onRemove: root.deleteCounter(slot.globalIndex)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: root.counters.length === 0
+                                        horizontalAlignment: Text.AlignHCenter
+                                        lineHeight: 1.3
+                                        text: "No counters yet\nName it, set a number, press +"
+                                        color: pal.muted
+                                        font.pixelSize: 12
+                                    }
+                                }
+
+                                // page dots (space is always reserved so nothing jumps)
+                                Row {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    height: 8
+                                    spacing: 6
+                                    opacity: root.pageCount > 1 ? 1 : 0
 
                                     Repeater {
-                                        model: 4
-                                        delegate: Item {
-                                            id: slot
+                                        model: root.pageCount
+                                        delegate: Rectangle {
                                             required property int index
-                                            width: (pageItem.width - 8) / 2
-                                            height: (pageItem.height - 8) / 2
-                                            readonly property var cdata: slot.index < pageItem.modelData.length ? pageItem.modelData[slot.index] : null
-
-                                            CounterCard {
+                                            readonly property bool current: index === root.counterPage
+                                            width: current ? 16 : 6
+                                            height: 6
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            radius: 3
+                                            color: pal.primary
+                                            opacity: current ? 0.9 : 0.25
+                                            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                                            Behavior on opacity { NumberAnimation { duration: 160 } }
+                                            MouseArea {
                                                 anchors.fill: parent
-                                                visible: slot.cdata !== null
-                                                palette: pal
-                                                entry: slot.cdata
-                                                onDecrement: root.changeCounter(pageItem.index * 4 + slot.index, -1)
-                                                onIncrement: root.changeCounter(pageItem.index * 4 + slot.index, 1)
-                                                onRemove: root.deleteCounter(pageItem.index * 4 + slot.index)
+                                                anchors.margins: -5
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.counterPage = index
                                             }
                                         }
                                     }
@@ -1085,115 +1229,112 @@ ShellRoot {
                             }
                         }
 
-                        // page dots — only shown once counters spill past one page
+                        // ---- controls: tonal | filled (stretches) | tonal ----
                         Row {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            height: 8
-                            spacing: 6
-                            visible: counterPagesView.count > 1
-
-                            Repeater {
-                                model: counterPagesView.count
-                                delegate: Rectangle {
-                                    required property int index
-                                    width: 6; height: 6; radius: 3
-                                    color: pal.primary
-                                    opacity: index === counterPagesView.currentIndex ? 0.9 : 0.25
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // controls — same layout as the MPRIS button row:
-                // tonal | filled (stretches, morphs while active) | tonal
-                Row {
-                    width: parent.width
-                    height: 56
-                    spacing: 4
-                    visible: mem.mode !== 2
-
-                    IconBtn {
-                        palette: pal
-                        width: 56; height: 56
-                        kind: "tonal"
-                        glyph: "reset"
-                        onClicked: root.reset()
-                    }
-                    IconBtn {
-                        palette: pal
-                        width: parent.width - 56 * 2 - 4 * 2; height: 56
-                        kind: "filled"
-                        checked: root.running
-                        glyph: root.running ? "pause" : "play"
-                        onClicked: root.toggleStart()
-                    }
-                    IconBtn {
-                        palette: pal
-                        width: 56; height: 56
-                        kind: "tonal"
-                        glyph: "flag"
-                        enabled: mem.mode === 0
-                        onClicked: root.lap()
-                    }
-                }
-
-                // laps
-                Rectangle {
-                    width: parent.width
-                    height: 12 + 24 + 4 + 66 + 12
-                    radius: 16
-                    color: pal.surfaceHigh
-                    visible: mem.mode === 0 && root.laps.length > 0
-
-                    Item {
-                        anchors.fill: parent
-                        anchors.margins: 12
-
-                        Item {
-                            id: lapHeader
                             width: parent.width
-                            height: 24
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: "Laps"
-                                color: pal.primary
-                                font.pixelSize: 12
-                                font.weight: Font.Medium
-                            }
-                            Chip {
+                            height: 56
+                            spacing: 8
+                            visible: mem.mode !== 2
+
+                            IconBtn {
                                 palette: pal
-                                anchors.right: parent.right
-                                tonal: false
-                                label: "Clear"
-                                onClicked: root.laps = []
+                                width: 56; height: 56
+                                kind: "tonal"
+                                glyph: "reset"
+                                onClicked: root.reset()
+                            }
+                            IconBtn {
+                                palette: pal
+                                width: parent.width - 56 * 2 - 8 * 2; height: 56
+                                kind: "filled"
+                                checked: root.running
+                                glyph: root.running ? "pause" : "play"
+                                enabled: mem.mode === 0 || mem.timerDurationMs > 0
+                                onClicked: root.toggleStart()
+                            }
+                            IconBtn {
+                                palette: pal
+                                width: 56; height: 56
+                                kind: "tonal"
+                                glyph: "flag"
+                                enabled: mem.mode === 0 && root.running
+                                onClicked: root.lap()
                             }
                         }
 
-                        ListView {
-                            anchors.top: lapHeader.bottom
-                            anchors.topMargin: 4
+                        // ---- laps ----
+                        Rectangle {
                             width: parent.width
-                            height: 66
-                            clip: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            model: root.laps.slice().reverse()
-                            delegate: Item {
-                                width: ListView.view.width
-                                height: 22
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: "#" + (root.laps.length - index)
-                                    color: pal.primary
-                                    font.pixelSize: 12
+                            height: 12 + 24 + 4 + 66 + 12
+                            radius: 18
+                            color: pal.surfaceHigh
+                            visible: mem.mode === 0 && root.laps.length > 0
+
+                            Item {
+                                anchors.fill: parent
+                                anchors.margins: 12
+
+                                Item {
+                                    id: lapHeader
+                                    width: parent.width
+                                    height: 24
+                                    Text {
+                                        anchors.left: parent.left
+                                        anchors.leftMargin: 2
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "Laps"
+                                        color: pal.primary
+                                        font.pixelSize: 12
+                                        font.weight: Font.Medium
+                                    }
+                                    Chip {
+                                        palette: pal
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        tonal: false
+                                        label: "Clear"
+                                        onClicked: root.laps = []
+                                    }
                                 }
-                                Text {
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: root.fmt(modelData, false)
-                                    color: pal.primary
-                                    font.pixelSize: 12
-                                    font.family: "monospace"
+
+                                ListView {
+                                    anchors.top: lapHeader.bottom
+                                    anchors.topMargin: 4
+                                    width: parent.width
+                                    height: 66
+                                    clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    model: root.lapItems
+                                    delegate: Item {
+                                        required property var modelData
+                                        width: ListView.view.width
+                                        height: 22
+                                        Text {
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 2
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "#" + modelData.n
+                                            color: pal.primary
+                                            font.pixelSize: 12
+                                        }
+                                        Text {
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "+" + root.fmt(modelData.delta, false)
+                                            color: pal.muted
+                                            font.pixelSize: 11
+                                            font.family: "monospace"
+                                        }
+                                        Text {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 2
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: root.fmt(modelData.total, false)
+                                            color: pal.primary
+                                            font.pixelSize: 12
+                                            font.family: "monospace"
+                                        }
+                                    }
                                 }
                             }
                         }
