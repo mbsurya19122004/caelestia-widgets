@@ -2,36 +2,21 @@
 // Standalone, single-file, plain Quickshell.
 //
 // WHAT CHANGED IN THIS REVISION
-//   - DRAGGING (the real fix): the layer surface is now full-screen and only
-//     the card is input-enabled (`mask: Region`). The card is a normal Item
-//     that moves inside a fixed window, so pointer coordinates (mapped to the
-//     window) never shift under your cursor. Result: 1:1 tracking, no jitter,
-//     no per-frame layer-shell reconfigure, no disk writes while dragging.
-//   - SMOOTHNESS: the old card was one big `layer.enabled` item with a blur
-//     shadow, so the whole widget was re-rendered into a texture every frame
-//     while the stopwatch ran. The shadow is now a few cheap static
-//     translucent rects behind the card, and the hover glow is a halo rect
-//     instead of a per-button MultiEffect.
-//   - LAYOUT: one spacing system (20 px card padding, 16 px between sections,
-//     8 px between buttons). Counter cards use a fixed inner layout
-//     (label row / trash on top, [-] ring [+] below) so nothing overlaps.
-//     The expand/collapse is animated on a fixed surface, and content is
-//     clipped + faded so it never spills outside the card mid-animation.
-//   - BUGS FIXED: counters could go below 0; changing page reset the counter
-//     view on every +/- click (now a simple page index); the timer ring drew
-//     the *elapsed* arc instead of the remaining one; the timer could not be
-//     restarted after finishing; adjusting a paused timer threw away the
-//     remaining time; mode-swap button made the header jump when hidden
-//     (now just disabled); counter text fields had no placeholder / Enter /
-//     Escape handling and the surface kept keyboard focus after typing.
-//   - PERSISTENCE: position, mode, pin state and timer length are saved to
-//     $XDG_STATE_HOME/chrono-widget/settings.json (debounced, only on
-//     release / change), counters to counters.json — survives `qs kill`
-//     and reboots.
-//   - EXTRAS: timer sends a desktop notification and blinks when done,
-//     collapsed icon shows a pulsing dot while running, laps show split +
-//     total, double-click a counter ring to reset it, mouse wheel / dots to
-//     page counters, Enter adds a counter, Escape leaves a text field.
+//   - OVERTIME RING: once the timer is up the whole ring turns red and blinks.
+//   - RINGTONE: a sound plays once when the timer ends. Default is a simple
+//     generated buzz (~/.local/state/chrono-widget/buzz.wav, needs python3
+//     once). To use your own sound, set `ringtone` in the CONFIG block at the
+//     top of ChronoWidget. Playback uses the first available of: pw-play,
+//     paplay, mpv, ffplay, aplay.
+//   - TIMER OVERTIME: when the timer reaches zero it keeps running and the
+//     display goes negative (e.g. -00:12.34), shown in the error colour and
+//     blinking. The notification fires once, on crossing zero. Pausing and
+//     resuming keeps counting overtime; reset starts over.
+//   - (previous) DRAGGING: full-screen layer surface, only the card is
+//     input-enabled (`mask: Region`), 1:1 tracking, no jitter.
+//   - (previous) SMOOTHNESS: static shadow rects, halo hover glow, no
+//     per-frame texture re-rendering.
+//   - (previous) LAYOUT / BUGS / PERSISTENCE / EXTRAS: see git history.
 //
 // SETUP
 //   1. Put this file at ~/.config/quickshell/chrono/shell.qml
@@ -97,6 +82,8 @@ ShellRoot {
                 return ["M5 12h14", ""];
             case "plus":
                 return ["M12 5v14 M5 12h14", ""];
+            case "bell":
+                return ["M6 9a6 6 0 0 1 12 0c0 6.5 2.5 8 2.5 8h-17s2.5-1.5 2.5-8z M10.2 20.5a2 2 0 0 0 3.6 0", ""];
             }
             return ["", ""];
         }
@@ -250,8 +237,10 @@ ShellRoot {
         property bool digits: false
         property int align: TextInput.AlignLeft
         property alias text: input.text
+        property int maxLen: digits ? 6 : 24
         signal accepted()
         signal escaped()
+        signal committed()      // Enter pressed or focus lost
 
         function clear() { input.text = ""; }
         function focusInput() { input.forceActiveFocus(); }
@@ -284,12 +273,13 @@ ShellRoot {
             font.pixelSize: 13
             clip: true
             selectByMouse: true
-            maximumLength: f.digits ? 6 : 24
+            maximumLength: f.maxLen
             inputMethodHints: f.digits ? Qt.ImhDigitsOnly : Qt.ImhNone
             validator: RegularExpressionValidator {
                 regularExpression: f.digits ? /^[0-9]*$/ : /^.*$/
             }
             onAccepted: f.accepted()
+            onEditingFinished: f.committed()
             Keys.onEscapePressed: f.escaped()
 
             Text {
@@ -430,6 +420,12 @@ ShellRoot {
     component ChronoWidget: PanelWindow {
         id: root
 
+        // ================= CONFIG =================
+        // Sound played once when the timer ends. Empty = built-in buzz.
+        // Example: "~/Music/alarm.ogg"
+        readonly property string ringtone: ""
+        // ==========================================
+
         // Bottom (not Background): Hyprland does not hand keyboard focus to
         // Background-layer surfaces, so typing in the counter fields needs
         // Bottom or above. Bottom still sits below normal windows.
@@ -461,9 +457,55 @@ ShellRoot {
         readonly property string countersPath: dataDir + "/counters.json"
         readonly property string settingsPath: dataDir + "/settings.json"
 
+        readonly property string buzzPath: dataDir + "/buzz.wav"
+
         Process {
             command: ["mkdir", "-p", root.dataDir]
             running: true
+        }
+
+        // Generates the default buzz (two short square-wave pulses) once.
+        Process {
+            command: ["python3", "-c", [
+                "import os, sys, wave, struct",
+                "p = sys.argv[1]",
+                "if os.path.exists(p): sys.exit(0)",
+                "os.makedirs(os.path.dirname(p), exist_ok=True)",
+                "r = 22050",
+                "def buzz(sec, hz=150):",
+                "    n = int(r * sec); out = []",
+                "    for i in range(n):",
+                "        env = min(1.0, i / 150.0, (n - i) / 150.0)",
+                "        v = 1 if (i * hz / r) % 1 < 0.5 else -1",
+                "        out.append(int(v * env * 0.35 * 32767))",
+                "    return out",
+                "def gap(sec): return [0] * int(r * sec)",
+                "data = buzz(0.22) + gap(0.08) + buzz(0.22) + gap(0.08) + buzz(0.22)",
+                "w = wave.open(p, 'w')",
+                "w.setnchannels(1); w.setsampwidth(2); w.setframerate(r)",
+                "w.writeframes(b''.join(struct.pack('<h', x) for x in data))",
+                "w.close()"
+            ].join("\n"), root.buzzPath]
+            running: true
+        }
+
+        // Plays an audio file with whatever player is installed.
+        Process {
+            id: player
+            property string file: ""
+            command: ["sh", "-c", [
+                'f="$1"',
+                'if [ ! -f "$f" ]; then',
+                '  command -v canberra-gtk-play >/dev/null && exec canberra-gtk-play -i alarm-clock-elapsed',
+                '  exit 1',
+                'fi',
+                'for c in "pw-play" "paplay" "mpv --no-video --really-quiet" "ffplay -nodisp -autoexit -loglevel quiet" "aplay -q"; do',
+                '  set -- $c',
+                '  command -v "$1" >/dev/null || continue',
+                '  "$@" "$f" >/dev/null 2>&1 && exit 0',
+                'done',
+                'exit 1'
+            ].join("\n"), "sh", player.file]
         }
 
         FileView {
@@ -583,6 +625,7 @@ ShellRoot {
         }
 
         // ---- timer state -------------------------------------------------------
+        // tmRemainingMs goes negative once the timer is up (overtime).
         property real tmEndAt: 0
         property real tmRemainingMs: mem.timerDurationMs
         property bool tmFinished: false
@@ -663,26 +706,36 @@ ShellRoot {
                     root.swElapsedMs = root.swAccumMs + (Date.now() - root.swStartedAt);
                 } else if (mem.mode === 1) {
                     var rem = root.tmEndAt - Date.now();
-                    if (rem <= 0) {
-                        root.tmRemainingMs = 0;
-                        root.running = false;
+                    root.tmRemainingMs = rem;                 // goes negative = overtime
+                    if (rem <= 0 && !root.tmFinished) {       // notify once, on crossing zero
                         root.tmFinished = true;
+                        root.playRingtone();
                         Quickshell.execDetached(["notify-send", "-a", "Chrono", "Timer finished",
                                                  root.fmt(mem.timerDurationMs, mem.timerDurationMs >= 3600000).split(".")[0]]);
-                    } else {
-                        root.tmRemainingMs = rem;
                     }
                 }
             }
         }
 
+        // ---- ringtone ----------------------------------------------------------
+        function playRingtone() {
+            var p = (root.ringtone || "").trim();
+            if (p.indexOf("~/") === 0) p = Quickshell.env("HOME") + p.slice(1);
+            if (p === "") p = root.buzzPath;
+            if (player.running) return;
+            player.file = p;
+            player.running = true;
+        }
+
         function fmt(ms, withHour) {
+            var neg = ms < 0;
+            if (neg) ms = -ms;
             var h = Math.floor(ms / 3600000);
             var m = Math.floor((ms % 3600000) / 60000);
             var s = Math.floor((ms % 60000) / 1000);
             var cs = Math.floor((ms % 1000) / 10);
             function pad(n) { return (n < 10 ? "0" : "") + n; }
-            return (withHour ? pad(h) + ":" : "") + pad(m) + ":" + pad(s) + "." + pad(cs);
+            return (neg ? "-" : "") + (withHour ? pad(h) + ":" : "") + pad(m) + ":" + pad(s) + "." + pad(cs);
         }
 
         function toggleStart() {
@@ -698,12 +751,11 @@ ShellRoot {
                 }
             } else {
                 if (root.running) {
-                    root.tmRemainingMs = Math.max(0, root.tmEndAt - Date.now());
+                    root.tmRemainingMs = root.tmEndAt - Date.now();   // no clamp: keep overtime
                     root.running = false;
                 } else {
                     if (mem.timerDurationMs <= 0) return;
-                    if (root.tmRemainingMs <= 0) root.tmRemainingMs = mem.timerDurationMs;  // restart after finish
-                    root.tmFinished = false;
+                    root.tmFinished = root.tmRemainingMs < 0;
                     root.tmEndAt = Date.now() + root.tmRemainingMs;
                     root.running = true;
                 }
@@ -727,15 +779,16 @@ ShellRoot {
             root.laps = l;
         }
 
-        // Changes the timer length; keeps whatever progress a paused timer has.
+        // Changes the timer length; keeps whatever progress a paused timer has
+        // (including overtime).
         function adjustTimer(deltaMs) {
             if (mem.mode !== 1 || root.running) return;
             var oldDur = mem.timerDurationMs;
             var newDur = Math.max(0, Math.min(99 * 3600000, oldDur + deltaMs));
             var applied = newDur - oldDur;
             mem.timerDurationMs = newDur;
-            root.tmRemainingMs = Math.max(0, Math.min(newDur, root.tmRemainingMs + applied));
-            root.tmFinished = false;
+            root.tmRemainingMs = Math.min(newDur, root.tmRemainingMs + applied);
+            root.tmFinished = root.tmRemainingMs < 0;
             scheduleSave();
         }
 
@@ -1013,12 +1066,16 @@ ShellRoot {
                                     layer.enabled: true
                                     layer.samples: 4
                                     // stopwatch: sweeps once per minute; timer: shows time remaining
+                                    // (clamped so the arc stays empty during overtime)
                                     property real frac: mem.mode === 0
                                         ? ((root.swElapsedMs % 60000) / 60000)
-                                        : (mem.timerDurationMs > 0 ? root.tmRemainingMs / mem.timerDurationMs : 0)
+                                        : (mem.timerDurationMs > 0 ? Math.max(0, root.tmRemainingMs / mem.timerDurationMs) : 0)
+                                    readonly property bool overtime: mem.mode === 1 && root.tmFinished
                                     ShapePath {
                                         strokeWidth: 6
-                                        strokeColor: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.22)
+                                        strokeColor: ring.overtime
+                                            ? Qt.rgba(pal.error.r, pal.error.g, pal.error.b, root.blink)   // full red ring, blinking
+                                            : Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.22)
                                         fillColor: "transparent"
                                         PathAngleArc {
                                             centerX: 94; centerY: 94
