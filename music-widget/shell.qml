@@ -20,7 +20,7 @@ ShellRoot {
         //   0.0 = fully transparent (only the art, text and buttons show)
         //   1.0 = solid
         // Text, album art and buttons always stay fully opaque.
-        property real cardOpacity: 0.75
+        property real cardOpacity: 0
 
         // Show the seek bar and timestamps. Set to false for an even
         // more minimal card.
@@ -77,6 +77,12 @@ ShellRoot {
         property bool clampToScreen: false
         property int snapDistance: 14
         property int edgeGap: 16
+
+        // Snap to 9 points: 4 corners, 4 edge midpoints and the centre.
+        // The card sticks when dragged within `pointSnapDistance` px of a
+        // point, and pulls free again if you keep dragging past that.
+        property bool snapToPoints: true
+        property int pointSnapDistance: 28
 
 
         // ============================================================
@@ -348,11 +354,53 @@ ShellRoot {
         }
 
 
-        // Relative move used by dragging: clamps to the screen and snaps to
-        // its edges.
+        // Returns the nearest of the 9 snap points if (l, t) is within
+        // pointSnapDistance of one, otherwise the position unchanged.
+        // l / t are window margins; the card sits `pad` px inside them.
+        function snapPoint(l, t) {
+            if (!snapToPoints || !screen || screen.width <= 0)
+                return { l: l, t: t }
+
+            const xs = [
+                edgeGap,
+                Math.round((screen.width - cardWidth) / 2),
+                screen.width - cardWidth - edgeGap
+            ]
+            const ys = [
+                edgeGap,
+                Math.round((screen.height - cardHeight) / 2),
+                screen.height - cardHeight - edgeGap
+            ]
+
+            let best = null
+            let bestDist = pointSnapDistance
+
+            for (const x of xs) {
+                for (const y of ys) {
+                    const dx = (l + pad) - x
+                    const dy = (t + pad) - y
+                    const d = Math.sqrt(dx * dx + dy * dy)
+
+                    if (d <= bestDist) {
+                        bestDist = d
+                        best = { l: x - pad, t: y - pad }
+                    }
+                }
+            }
+
+            return best ? best : { l: l, t: t }
+        }
+
+
+        // Relative move used by dragging: snaps to the 9 points, and
+        // optionally clamps to the screen / snaps to its edges.
         function moveBy(dx, dy) {
             let l = margins.left + dx
             let t = margins.top + dy
+
+            const s = snapPoint(l, t)
+            l = s.l
+            t = s.t
 
             if (clampToScreen && screen && screen.width > 0) {
                 // The card sits `pad` px inside the window.
