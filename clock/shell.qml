@@ -19,7 +19,7 @@ ShellRoot {
     // ───────────────────────── Config (tweak freely) ─────────────────────────
     property bool   use24h:     false
     property string fontFamily: "Rubik"   // rounded + sturdy; also nice: "Outfit", "Sora", "Lexend", "Space Grotesk"
-    property int    digitSize:  92
+    property int    digitSize:  120
     property int    digitWeight: Font.DemiBold   // Normal < Medium < DemiBold < Bold < ExtraBold
     // gap kept between the widget and each screen edge when snapped
     property int    insetLeft:   12   // leaves room for Caelestia's left bar

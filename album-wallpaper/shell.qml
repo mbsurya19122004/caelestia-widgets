@@ -9,61 +9,39 @@ import Quickshell.Services.Mpris
  * Runs as its OWN quickshell process — a separate module, not part
  * of caelestia-shell's QML tree. It only touches caelestia the same
  * way a shell script would: by calling the `caelestia wallpaper`
- * command. Nothing here imports or depends on caelestia's services.
+ * command.
  *
  * WHAT IT DOES
- *   - Watches MPRIS for a player that's actively playing.
+ *   - Watches MPRIS for an allowed player that's actively playing.
  *   - On a new track's art, snapshots your current wallpaper (read
  *     from caelestia's own state file) once, then runs
  *       caelestia wallpaper -f <art>
- *     to set the real desktop background to the album cover.
- *   - When playback stops/pauses (after a short debounce so back-to-
- *     back tracks don't flicker), restores the wallpaper you had
- *     before, via the same command.
+ *   - When playback stops/pauses (after a short debounce), restores
+ *     the wallpaper you had before.
+ *   - When you switch it OFF via IPC, it immediately restores the
+ *     wallpaper you had before the song started and stops reacting
+ *     to music until switched back ON.
  *
  * PLAYER FILTERING
- *   MPRIS has no "this is music, not video" flag — a browser tab
- *   playing a YouTube video and a browser tab playing open.spotify.com
- *   both show up under the same player identity (e.g. "Firefox").
- *   There is no reliable way to distinguish them at the protocol
- *   level. So instead this only reacts to players whose MPRIS
- *   identity/desktopEntry matches the `allowedPlayers` whitelist
- *   below, which defaults to the native Spotify client only.
- *   Generic browsers are deliberately never matched, so YouTube (or
- *   any other video played in a browser) will never trigger a
- *   wallpaper change — even if you also listen to music in that same
- *   browser.
- *
- *   To also allow another *native* music app (not a browser), add
- *   its MPRIS identity or desktopEntry (lowercase, substring match)
- *   to allowedPlayers, e.g. ["spotify", "vlc"] if you use VLC only
- *   for audio. Do NOT add "firefox"/"chromium"/"chrome" etc. — that
- *   reopens the YouTube problem.
+ *   Only players whose MPRIS identity/desktopEntry matches
+ *   `allowedPlayers` (default: spotify) are used. Never add browsers.
  *
  * REQUIRES
- *   - the `caelestia` CLI (ships with caelestia-shell)
- *   - `curl` on PATH, only for players whose MPRIS art url is remote
- *     (e.g. Spotify via spotifyd/mpris-proxy); local file:// art is
- *     used directly
+ *   - the `caelestia` CLI
+ *   - `curl` on PATH for remote art urls
  *
  * INSTALL
  *   ~/.config/quickshell/albumwallpaper/shell.qml   (this file)
  *
  * RUN
  *   quickshell -c albumwallpaper
- *   Add that as an exec-once in your Hyprland config, or wrap it in
- *   a systemd --user unit, to start it with your session.
- *
- * NOTE ON THEMING
- *   caelestia-shell regenerates its Material You colour scheme from
- *   whichever wallpaper is active. If your scheme mode is "dynamic",
- *   accent colours will shift with every track. Run
- *   `caelestia scheme set -n <name>` to pin a static scheme if you
- *   don't want that side effect.
  *
  * CONTROL
- *   qs ipc call albumwallpaper toggle
- *   qs ipc call albumwallpaper status
+ *   qs -c albumwallpaper ipc call albumwallpaper toggle
+ *   qs -c albumwallpaper ipc call albumwallpaper on
+ *   qs -c albumwallpaper ipc call albumwallpaper off
+ *   qs -c albumwallpaper ipc call albumwallpaper status
+ *   (If it's your only quickshell instance, `qs ipc call ...` works too.)
  */
 ShellRoot {
     id: root
@@ -75,10 +53,6 @@ ShellRoot {
     property string wallpaperStateFile: (Quickshell.env("HOME") || "/tmp") + "/.local/state/caelestia/wallpaper/path.txt"
     property int keepCachedFiles: 20 // how many past songs' art to keep on disk
 
-    // Only players whose MPRIS identity or desktopEntry contains one of
-    // these (case-insensitive, substring match) will ever trigger a
-    // wallpaper change. Keep this to real music apps — never browsers —
-    // since MPRIS can't tell a music tab from a video tab.
     property var allowedPlayers: ["spotify"]
 
     // ---------------- internal state — don't touch ----------------
@@ -88,11 +62,6 @@ ShellRoot {
     property string pendingArtUrl: ""
     property string pendingFileName: ""
 
-    // caelestia's own background renderer caches its Image by path, so
-    // calling `caelestia wallpaper -f` twice with the SAME path won't
-    // actually redraw — only a genuinely different path forces a reload.
-    // Naming each cached file after the song guarantees a fresh path
-    // every time AND makes the cache dir human-readable.
     function sanitize(s) {
         const cleaned = (s || "").toString().trim()
             .replace(/[^a-zA-Z0-9]+/g, "_")
@@ -107,9 +76,6 @@ ShellRoot {
         return artist + "_-_" + title + "_" + id + ".jpg";
     }
 
-    // Checks a player's MPRIS identity/desktopEntry against allowedPlayers.
-    // Substring + lowercase match so "Spotify" identity or a
-    // "spotify.desktop" desktopEntry both match an "spotify" entry.
     function isAllowedPlayer(p) {
         if (!p) return false;
         const identity = (p.identity || "").toString().toLowerCase();
@@ -132,7 +98,19 @@ ShellRoot {
     }
 
     onActivePlayerChanged: evaluate()
-    onEnabledChanged: evaluate()
+
+    onEnabledChanged: {
+        if (!enabled) {
+            // Switched off: cancel anything pending and put the old
+            // wallpaper back right away, regardless of playback state.
+            console.log("[albumwallpaper] disabled");
+            restoreTimer.stop();
+            performRestore(true);
+        } else {
+            console.log("[albumwallpaper] enabled");
+            evaluate();
+        }
+    }
 
     Connections {
         target: root.activePlayer
@@ -152,6 +130,7 @@ ShellRoot {
         if (!enabled) return;
         const p = activePlayer;
         if (p && p.playbackState === MprisPlaybackState.Playing && p.trackArtUrl) {
+            restoreTimer.stop();
             requestArt(p);
         } else {
             scheduleRestore();
@@ -178,6 +157,8 @@ ShellRoot {
         command: ["cat", root.wallpaperStateFile]
         stdout: StdioCollector {
             onStreamFinished: {
+                // disabled while we were reading the state file -> do nothing
+                if (!root.enabled) return;
                 root.previousWallpaper = text.trim();
                 root.wallpaperOverridden = true;
                 root.applyPendingArt();
@@ -186,6 +167,7 @@ ShellRoot {
     }
 
     function applyPendingArt() {
+        if (!enabled) return;
         const url = pendingArtUrl;
         if (!url) return;
         lastAppliedArt = url;
@@ -206,15 +188,14 @@ ShellRoot {
         command: ["curl", "-sL", artUrl, "-o", outFile]
         onExited: (exitCode) => {
             console.log("[albumwallpaper] curl exit", exitCode, "->", outFile);
-            if (exitCode === 0) {
+            // If we were switched off mid-download, don't clobber the restored wallpaper.
+            if (exitCode === 0 && root.enabled) {
                 root.setWallpaper(outFile);
                 root.pruneCache();
             }
         }
     }
 
-    // Keep only the most recent `keepCachedFiles` art files so the cache
-    // dir doesn't grow forever over a long listening session.
     function pruneCache() {
         pruneProc.running = true;
     }
@@ -243,7 +224,7 @@ ShellRoot {
     Timer {
         id: restoreTimer
         interval: root.restoreDelayMs
-        onTriggered: root.performRestore()
+        onTriggered: root.performRestore(false)
     }
 
     function scheduleRestore() {
@@ -252,11 +233,16 @@ ShellRoot {
         restoreTimer.restart();
     }
 
-    function performRestore() {
-        const p = activePlayer;
-        if (p && p.playbackState === MprisPlaybackState.Playing && p.trackArtUrl) {
-            console.log("[albumwallpaper] restore cancelled — playback resumed");
-            return; // something started again during the debounce
+    // force = true skips the "did playback resume?" check (used when switching off)
+    function performRestore(force) {
+        if (!wallpaperOverridden) return;
+
+        if (!force) {
+            const p = activePlayer;
+            if (p && p.playbackState === MprisPlaybackState.Playing && p.trackArtUrl) {
+                console.log("[albumwallpaper] restore cancelled — playback resumed");
+                return;
+            }
         }
         if (previousWallpaper.length > 0) {
             console.log("[albumwallpaper] restoring original wallpaper:", previousWallpaper);
@@ -274,6 +260,8 @@ ShellRoot {
         target: "albumwallpaper"
 
         function toggle(): void { root.enabled = !root.enabled; }
+        function on(): void { root.enabled = true; }
+        function off(): void { root.enabled = false; }
         function status(): string { return root.enabled ? "enabled" : "disabled"; }
     }
 }
