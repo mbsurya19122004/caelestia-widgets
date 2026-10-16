@@ -33,7 +33,7 @@ ShellRoot {
     // background card (double-click the widget to toggle at runtime)
     property bool   showBackground: false
     property real   cardAlpha:      0.35   // glass opacity
-    property int    cardRadius:     90
+    property int    cardRadius:     20
 
     // how close (px) you must drop it to a snap spot for it to snap; bigger = stickier
     property int    snapDistance:   100
