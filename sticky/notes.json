@@ -1,8 +1,20 @@
 [
   {
-    "x": 1653,
-    "y": 46,
+    "x": 1655,
+    "y": 39,
     "text": "LEETCODE 132\n- why tabulation didnt work ?\n- why need to check i->k pali before calculation recursive calls",
     "ci": 1
+  },
+  {
+    "x": 1430,
+    "y": 39,
+    "text": "23 - set\n24 - pdp\n25 - sys des\n30 - ml\n31 - frontend",
+    "ci": 2
+  },
+  {
+    "x": 1655,
+    "y": 262,
+    "text": "",
+    "ci": 3
   }
 ]
