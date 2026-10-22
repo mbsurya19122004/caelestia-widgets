@@ -3,6 +3,7 @@
 // Colours follow Caelestia's ~/.local/state/caelestia/scheme.json and update live.
 // Drag to move it. Let go near one of 9 spots (corners, edge middles, centre) and it snaps there;
 // let go anywhere else and it stays exactly where you dropped it.
+// While you drag, guide dots + boxes show all 9 spots and light up the one it will snap to.
 // Double-click toggles the background. Position/background are saved to
 // $XDG_STATE_HOME/glassclock/pos.json.
 
@@ -37,6 +38,9 @@ ShellRoot {
 
     // how close (px) you must drop it to a snap spot for it to snap; bigger = stickier
     property int    snapDistance:   100
+
+    // while dragging, show the 9 snap spots (dot + box) and highlight the one it will snap to
+    property bool   showSnapGuides: true
 
     // ───────────────────────── Paths ─────────────────────────
     readonly property string home:      Quickshell.env("HOME")
@@ -125,6 +129,13 @@ ShellRoot {
         }
         return { i: best, d: bestD };
     }
+    // spot it will snap to if dropped right now (-1 = too far from all, so it stays where dropped)
+    readonly property int nearSlot: {
+        if (!dragging) return -1;
+        var n = nearest(curX, curY);
+        return n.d <= snapDistance ? n.i : -1;
+    }
+
     readonly property real targetX: slot >= 0 ? slotX(slot) : Math.max(0, Math.min(screenW - cardW, freeX))
     readonly property real targetY: slot >= 0 ? slotY(slot) : Math.max(0, Math.min(screenH - cardH, freeY))
 
@@ -356,6 +367,67 @@ ShellRoot {
                 }
                 onCanceled: {
                     root.dragging = false;
+                }
+            }
+        }
+    }
+
+    // ───────────────────────── Snap guides ─────────────────────────
+    // Full-screen overlay that only exists while dragging. It takes no input (empty mask), so
+    // clicks fall straight through to the desktop. It sits on the Top layer so it isn't hidden.
+    PanelWindow {
+        id: guides
+
+        screen: win.screen
+        anchors { top: true; bottom: true; left: true; right: true }
+        color: "transparent"
+        exclusionMode: ExclusionMode.Ignore
+        focusable: false
+        mask: Region {}
+
+        WlrLayershell.namespace: "glassclock-guides"
+        WlrLayershell.layer: WlrLayer.Top
+
+        visible: root.showSnapGuides && (root.dragging || guideRoot.opacity > 0.01)
+
+        Item {
+            id: guideRoot
+            anchors.fill: parent
+            opacity: root.dragging ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: 160 } }
+
+            Repeater {
+                model: 9
+
+                delegate: Item {
+                    id: g
+                    required property int index
+                    readonly property bool near: root.nearSlot === index
+
+                    // box: where the widget will land
+                    Rectangle {
+                        x: root.slotX(g.index)
+                        y: root.slotY(g.index)
+                        width: root.cardW
+                        height: root.cardH
+                        radius: root.cardRadius
+                        color: g.near ? root.alpha(root.cPrimary, 0.08) : "transparent"
+                        border.width: g.near ? 2 : 1
+                        border.color: g.near ? root.alpha(root.cPrimary, 0.75)
+                                             : root.alpha(root.cOnSurface, 0.16)
+                        Behavior on border.width { NumberAnimation { duration: 120 } }
+                    }
+
+                    // dot: centre of that box
+                    Rectangle {
+                        width: g.near ? 18 : 10
+                        height: width
+                        radius: width / 2
+                        x: root.slotX(g.index) + root.cardW / 2 - width / 2
+                        y: root.slotY(g.index) + root.cardH / 2 - height / 2
+                        color: g.near ? root.cPrimary : root.alpha(root.cOnSurface, 0.4)
+                        Behavior on width { NumberAnimation { duration: 120 } }
+                    }
                 }
             }
         }

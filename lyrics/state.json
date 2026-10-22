@@ -6,9 +6,9 @@
     "fontSize": 26,
     "fontWeight": 400,
     "glowStrength": 1,
-    "locked": false,
-    "posX": 680,
-    "posY": 390,
-    "snap": 4,
+    "locked": true,
+    "posX": 670.6875,
+    "posY": 246.515625,
+    "snap": -1,
     "waveSpread": 0.5
 }

@@ -487,6 +487,15 @@ ShellRoot {
         property bool snapToPoints: true
         property int pointSnapDistance: 28
 
+        // While dragging, show all 9 snap points (a dot + a faint box where the
+        // card would land) on a full-screen click-through overlay, and light up
+        // the one the card is about to stick to.
+        property bool showSnapGuides: true
+
+        // True while the card is actually being dragged (set by the drag area).
+        property bool dragging: false
+        property int dragTick: 0
+
 
         // ============================================================
         // WINDOW / POSITION
@@ -865,6 +874,51 @@ ShellRoot {
             return best ? best : { l: l, t: t }
         }
 
+        // Top-left of the card (screen coordinates) at snap point i.
+        // i = row * 3 + col: 0 top-left, 1 top-centre, 2 top-right,
+        // 3 middle-left, 4 centre, 5 middle-right, 6..8 bottom row.
+        function pointAt(i) {
+            const w = screen ? screen.width : 0
+            const h = screen ? screen.height : 0
+            const col = i % 3
+            const row = Math.floor(i / 3)
+
+            return {
+                x: col === 0 ? edgeGap
+                   : (col === 1 ? Math.round((w - cardWidth) / 2)
+                                : w - cardWidth - edgeGap),
+                y: row === 0 ? edgeGap
+                   : (row === 1 ? Math.round((h - cardHeight) / 2)
+                                : h - cardHeight - edgeGap)
+            }
+        }
+
+        // Index (0..8) of the snap point the card is stuck to / about to
+        // stick to while dragging, or -1.
+        readonly property int nearPoint: {
+            dragTick   // re-evaluate on every drag step
+
+            if (!dragging || !snapToPoints || !screen || screen.width <= 0)
+                return -1
+
+            const cx = margins.left + pad
+            const cy = margins.top + pad
+            let best = -1
+            let bestDist = pointSnapDistance + 1
+
+            for (let i = 0; i < 9; i++) {
+                const a = pointAt(i)
+                const d = Math.sqrt((a.x - cx) * (a.x - cx) + (a.y - cy) * (a.y - cy))
+
+                if (d < bestDist) {
+                    bestDist = d
+                    best = i
+                }
+            }
+
+            return best
+        }
+
         // Relative move used by dragging: snaps to the 9 points, and
         // optionally clamps to the screen / snaps to its edges.
         function moveBy(dx, dy) {
@@ -889,6 +943,7 @@ ShellRoot {
 
             margins.left = l
             margins.top = t
+            dragTick++
         }
 
 
@@ -1245,11 +1300,18 @@ ShellRoot {
 
                         travel += Math.abs(dx) + Math.abs(dy)
 
+                        if (travel > 4 && !pin.locked)
+                            pin.dragging = true
+
                         if (!pin.locked)
                             pin.moveBy(dx, dy)
                     }
 
+                    onCanceled: pin.dragging = false
+
                     onReleased: (mouse) => {
+                        pin.dragging = false
+
                         if (travel > 4 || !pin.hasPlayer)
                             return
 
@@ -2137,6 +2199,95 @@ ShellRoot {
                                 color: pin.colGold
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+
+    // ================================================================
+    // SNAP GUIDES
+    //
+    // A full-screen overlay that exists only while the card is being
+    // dragged. Nothing in it takes input (empty mask), so it never gets
+    // in the way. It sits on the Top layer so the dots and boxes are not
+    // hidden behind other windows.
+    // ================================================================
+
+    PanelWindow {
+        id: guides
+
+        screen: pin.screen
+
+        anchors {
+            top: true
+            bottom: true
+            left: true
+            right: true
+        }
+
+        color: "transparent"
+        exclusiveZone: -1
+        focusable: false
+
+        // Empty region = fully click-through.
+        mask: Region {}
+
+        WlrLayershell.layer: WlrLayer.Top
+        WlrLayershell.namespace: "mpris-pin-guides"
+
+        visible: pin.showSnapGuides && pin.snapToPoints &&
+                 (pin.dragging || guideRoot.opacity > 0.01)
+
+        Item {
+            id: guideRoot
+
+            anchors.fill: parent
+
+            opacity: pin.dragging ? 1 : 0
+
+            Behavior on opacity { NumberAnimation { duration: 160 } }
+
+            Repeater {
+                model: 9
+
+                delegate: Item {
+                    id: g
+
+                    required property int index
+
+                    readonly property var pt: pin.pointAt(index)
+                    readonly property bool near: pin.nearPoint === index
+
+                    // Box: where the card will land.
+                    Rectangle {
+                        x: g.pt.x
+                        y: g.pt.y
+                        width: pin.cardWidth
+                        height: pin.cardHeight
+                        radius: 26
+
+                        color: g.near ? Qt.alpha(pin.colGold, 0.08) : "transparent"
+                        border.width: g.near ? 2 : 1
+                        border.color: g.near ? Qt.alpha(pin.colGold, 0.7)
+                                             : Qt.alpha(pin.colCream, 0.16)
+
+                        Behavior on border.width { NumberAnimation { duration: 120 } }
+                    }
+
+                    // Dot at the box centre.
+                    Rectangle {
+                        width: g.near ? 18 : 10
+                        height: width
+                        radius: width / 2
+
+                        x: g.pt.x + pin.cardWidth / 2 - width / 2
+                        y: g.pt.y + pin.cardHeight / 2 - height / 2
+
+                        color: g.near ? pin.colGold : Qt.alpha(pin.colCream, 0.4)
+
+                        Behavior on width { NumberAnimation { duration: 120 } }
                     }
                 }
             }
