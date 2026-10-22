@@ -14,6 +14,12 @@ import Quickshell.Wayland
 // [[wikilinks]], #tags, bare URLs.
 // Editor keys: Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+H highlight,
 // Ctrl+Shift+X strike, Ctrl+E toggle preview, Enter continues lists, Tab indents.
+//
+// IPC (qs -c sticky-notes ipc call sticky <fn>):
+//   add     start placing a new note (also shows notes if hidden)
+//   toggle  show / hide all notes
+//   show    show all notes
+//   hide    hide all notes
 ShellRoot {
     id: root
 
@@ -21,6 +27,9 @@ ShellRoot {
     // true  = notes sit on the desktop, behind your windows
     // false = notes float above your windows
     property bool desktopOnly: true
+
+    // toggled via IPC: qs -c sticky-notes ipc call sticky toggle
+    property bool notesVisible: true
 
     property bool placing: false
     readonly property int noteW: 240
@@ -591,10 +600,25 @@ ShellRoot {
         onTriggered: root.save()
     }
 
-    // Hyprland keybind:  bind = SUPER, N, exec, qs -c sticky-notes ipc call sticky add
+    // Hyprland keybinds:
+    //   bind = SUPER, N, exec, qs -c sticky-notes ipc call sticky add
+    //   bind = SUPER SHIFT, N, exec, qs -c sticky-notes ipc call sticky toggle
     IpcHandler {
         target: "sticky"
-        function add(): void { root.placing = true; }
+
+        function add(): void {
+            root.notesVisible = true;   // make sure notes are visible when adding
+            root.placing = true;
+        }
+        function toggle(): void {
+            root.notesVisible = !root.notesVisible;
+            if (!root.notesVisible) root.placing = false;
+        }
+        function show(): void { root.notesVisible = true; }
+        function hide(): void {
+            root.notesVisible = false;
+            root.placing = false;
+        }
     }
 
     // =====================================================================
@@ -608,6 +632,8 @@ ShellRoot {
 
             required property int index
             required property var model
+
+            visible: root.notesVisible
 
             // live position (margins from the top-left corner of the screen)
             property int posX: model.x
@@ -667,6 +693,8 @@ ShellRoot {
     // Small "+" button window (bottom-right)
     // =====================================================================
     PanelWindow {
+        visible: root.notesVisible
+
         anchors { bottom: true; right: true }
         margins { bottom: 24; right: 24 }
         implicitWidth: 44
