@@ -2,19 +2,25 @@
   {
     "x": 1655,
     "y": 39,
-    "text": "LEETCODE 132\n- why tabulation didnt work ?\n- why need to check i->k pali before calculation recursive calls",
-    "ci": 1
+    "text": "## LEETCODE 132\n- why tabulation didnt work ?\n- why need to check i->k pali before calculation recursive calls",
+    "ci": 15
   },
   {
-    "x": 1430,
-    "y": 39,
+    "x": 1409,
+    "y": 40,
     "text": "23 - set\n24 - pdp\n25 - sys des\n30 - ml\n31 - frontend",
-    "ci": 2
+    "ci": 12
   },
   {
-    "x": 1655,
-    "y": 262,
-    "text": "",
-    "ci": 3
+    "x": 1658,
+    "y": 295,
+    "text": "-  Q7\n- Q10\n- Q25\n- Q40\n- Q47\n- Q48\n- Q49 ⭐️⭐️\n- Q50 ⭐️⭐️\n- Q52 ⭐️⭐️\n- Q64\n- Q73 ⭐️⭐️⭐️",
+    "ci": 14
+  },
+  {
+    "x": 1408,
+    "y": 300,
+    "text": "- [ ] how to find omega and theta using T(n)\n- [ ] quick sort\n- [ ] heap sort\n- [ ] modulo and modulo inverse\n- [ ] activity selection greedy",
+    "ci": 13
   }
 ]

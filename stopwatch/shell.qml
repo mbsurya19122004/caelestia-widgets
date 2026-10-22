@@ -2,21 +2,22 @@
 // Standalone, single-file, plain Quickshell.
 //
 // WHAT CHANGED IN THIS REVISION
-//   - OVERTIME RING: once the timer is up the whole ring turns red and blinks.
-//   - RINGTONE: a sound plays once when the timer ends. Default is a simple
-//     generated buzz (~/.local/state/chrono-widget/buzz.wav, needs python3
-//     once). To use your own sound, set `ringtone` in the CONFIG block at the
-//     top of ChronoWidget. Playback uses the first available of: pw-play,
-//     paplay, mpv, ffplay, aplay.
-//   - TIMER OVERTIME: when the timer reaches zero it keeps running and the
-//     display goes negative (e.g. -00:12.34), shown in the error colour and
-//     blinking. The notification fires once, on crossing zero. Pausing and
-//     resuming keeps counting overtime; reset starts over.
-//   - (previous) DRAGGING: full-screen layer surface, only the card is
-//     input-enabled (`mask: Region`), 1:1 tracking, no jitter.
-//   - (previous) SMOOTHNESS: static shadow rects, halo hover glow, no
-//     per-frame texture re-rendering.
-//   - (previous) LAYOUT / BUGS / PERSISTENCE / EXTRAS: see git history.
+//   - INDEPENDENT MODES: stopwatch and timer now run at the same time, and
+//     you can switch between stopwatch / timer / counters freely while either
+//     is running. Each has its own running state; one shared 16 ms clock ticks
+//     while either is active. All time is computed from Date.now() timestamps
+//     (never by counting ticks), so precision is unaffected by switching modes.
+//   - (previous) OVERTIME RING: once the timer is up the whole ring turns red
+//     and blinks.
+//   - (previous) RINGTONE: a sound plays once when the timer ends. Default is
+//     a simple generated buzz (~/.local/state/chrono-widget/buzz.wav, needs
+//     python3 once). To use your own sound, set `ringtone` in the CONFIG block
+//     at the top of ChronoWidget. Playback uses the first available of:
+//     pw-play, paplay, mpv, ffplay, aplay.
+//   - (previous) TIMER OVERTIME: when the timer reaches zero it keeps running
+//     and the display goes negative (e.g. -00:12.34), shown in the error
+//     colour and blinking. The notification fires once, on crossing zero.
+//   - (previous) DRAGGING / SMOOTHNESS / LAYOUT / PERSISTENCE: see git history.
 //
 // SETUP
 //   1. Put this file at ~/.config/quickshell/chrono/shell.qml
@@ -608,7 +609,14 @@ ShellRoot {
         }
 
         // ---- expand / collapse -------------------------------------------------
-        property bool running: false
+        // Stopwatch and timer run independently of each other and of the
+        // currently shown mode.
+        property bool swRunning: false
+        property bool tmRunning: false
+        readonly property bool anyRunning: swRunning || tmRunning
+        // running state of whichever mode is currently shown
+        readonly property bool modeRunning: mem.mode === 0 ? swRunning : (mem.mode === 1 ? tmRunning : false)
+
         property bool manualOpen: false
         property bool expanded: manualOpen || mem.pinned
 
@@ -630,8 +638,9 @@ ShellRoot {
         property real tmRemainingMs: mem.timerDurationMs
         property bool tmFinished: false
         property real blink: 1
+        // blinks whenever the timer is in overtime, whatever mode is shown
         SequentialAnimation on blink {
-            running: root.tmFinished && mem.mode === 1
+            running: root.tmFinished
             loops: Animation.Infinite
             NumberAnimation { to: 0.3; duration: 550; easing.type: Easing.InOutSine }
             NumberAnimation { to: 1.0; duration: 550; easing.type: Easing.InOutSine }
@@ -697,15 +706,20 @@ ShellRoot {
         }
 
         // ---- clock -------------------------------------------------------------
+        // One shared ticker; each clock derives its value from Date.now() and
+        // its own anchor timestamp, so nothing drifts regardless of tick jitter
+        // or which mode is on screen.
         Timer {
             interval: 16
-            running: root.running
+            running: root.anyRunning
             repeat: true
             onTriggered: {
-                if (mem.mode === 0) {
-                    root.swElapsedMs = root.swAccumMs + (Date.now() - root.swStartedAt);
-                } else if (mem.mode === 1) {
-                    var rem = root.tmEndAt - Date.now();
+                var now = Date.now();
+                if (root.swRunning)
+                    root.swElapsedMs = root.swAccumMs + (now - root.swStartedAt);
+
+                if (root.tmRunning) {
+                    var rem = root.tmEndAt - now;
                     root.tmRemainingMs = rem;                 // goes negative = overtime
                     if (rem <= 0 && !root.tmFinished) {       // notify once, on crossing zero
                         root.tmFinished = true;
@@ -738,51 +752,57 @@ ShellRoot {
             return (neg ? "-" : "") + (withHour ? pad(h) + ":" : "") + pad(m) + ":" + pad(s) + "." + pad(cs);
         }
 
+        // Start / pause the clock of the mode currently shown.
         function toggleStart() {
             if (mem.mode === 2) return;
+            var now = Date.now();
             if (mem.mode === 0) {
-                if (root.running) {
-                    root.swAccumMs += Date.now() - root.swStartedAt;
+                if (root.swRunning) {
+                    root.swAccumMs += now - root.swStartedAt;
                     root.swElapsedMs = root.swAccumMs;
-                    root.running = false;
+                    root.swRunning = false;
                 } else {
-                    root.swStartedAt = Date.now();
-                    root.running = true;
+                    root.swStartedAt = now;
+                    root.swRunning = true;
                 }
             } else {
-                if (root.running) {
-                    root.tmRemainingMs = root.tmEndAt - Date.now();   // no clamp: keep overtime
-                    root.running = false;
+                if (root.tmRunning) {
+                    root.tmRemainingMs = root.tmEndAt - now;   // no clamp: keep overtime
+                    root.tmRunning = false;
                 } else {
                     if (mem.timerDurationMs <= 0) return;
                     root.tmFinished = root.tmRemainingMs < 0;
-                    root.tmEndAt = Date.now() + root.tmRemainingMs;
-                    root.running = true;
+                    root.tmEndAt = now + root.tmRemainingMs;
+                    root.tmRunning = true;
                 }
             }
         }
 
+        // Reset only the mode currently shown; the other keeps running.
         function reset() {
-            root.running = false;
             if (mem.mode === 0) {
+                root.swRunning = false;
                 root.swAccumMs = 0; root.swElapsedMs = 0; root.laps = [];
             } else if (mem.mode === 1) {
+                root.tmRunning = false;
                 root.tmFinished = false;
                 root.tmRemainingMs = mem.timerDurationMs;
             }
         }
 
         function lap() {
-            if (mem.mode !== 0 || !root.running) return;
+            if (mem.mode !== 0 || !root.swRunning) return;
+            // sample the exact time now rather than the last 16 ms tick
+            var exact = root.swAccumMs + (Date.now() - root.swStartedAt);
             var l = root.laps.slice();
-            l.push(root.swElapsedMs);
+            l.push(exact);
             root.laps = l;
         }
 
         // Changes the timer length; keeps whatever progress a paused timer has
         // (including overtime).
         function adjustTimer(deltaMs) {
-            if (mem.mode !== 1 || root.running) return;
+            if (mem.mode !== 1 || root.tmRunning) return;
             var oldDur = mem.timerDurationMs;
             var newDur = Math.max(0, Math.min(99 * 3600000, oldDur + deltaMs));
             var applied = newDur - oldDur;
@@ -792,8 +812,8 @@ ShellRoot {
             scheduleSave();
         }
 
+        // Switching is always allowed; running clocks keep going in the background.
         function cycleMode() {
-            if (root.running) return;
             mem.mode = (mem.mode + 1) % 3;
             card.forceActiveFocus();
             scheduleSave();
@@ -890,17 +910,17 @@ ShellRoot {
                         color: pal.primary
                         size: 24
                     }
-                    // running indicator
+                    // running indicator (any clock running, or timer in overtime)
                     Rectangle {
                         x: 38; y: 9
                         width: 9; height: 9; radius: 5
                         color: root.tmFinished ? pal.error : pal.primary
                         border.width: 2
                         border.color: pal.surface
-                        visible: root.running || root.tmFinished
+                        visible: root.anyRunning || root.tmFinished
                         opacity: root.tmFinished ? root.blink : 1
                         SequentialAnimation on opacity {
-                            running: root.running
+                            running: root.anyRunning && !root.tmFinished
                             loops: Animation.Infinite
                             NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
                             NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutSine }
@@ -1029,7 +1049,6 @@ ShellRoot {
                                     width: 32; height: 32
                                     kind: "text"
                                     glyph: "swap"; glyphSize: 20
-                                    enabled: !root.running
                                     onClicked: root.cycleMode()
                                 }
                                 IconBtn {
@@ -1105,7 +1124,8 @@ ShellRoot {
                                     width: 168; height: 168; radius: 84
                                     color: pal.surfaceHigh
 
-                                    readonly property bool editing: mem.mode === 1 && !root.running
+                                    // timer chips show only while the timer is shown and paused
+                                    readonly property bool editing: mem.mode === 1 && !root.tmRunning
 
                                     Text {
                                         id: timeText
@@ -1304,8 +1324,8 @@ ShellRoot {
                                 palette: pal
                                 width: parent.width - 56 * 2 - 8 * 2; height: 56
                                 kind: "filled"
-                                checked: root.running
-                                glyph: root.running ? "pause" : "play"
+                                checked: root.modeRunning
+                                glyph: root.modeRunning ? "pause" : "play"
                                 enabled: mem.mode === 0 || mem.timerDurationMs > 0
                                 onClicked: root.toggleStart()
                             }
@@ -1314,7 +1334,7 @@ ShellRoot {
                                 width: 56; height: 56
                                 kind: "tonal"
                                 glyph: "flag"
-                                enabled: mem.mode === 0 && root.running
+                                enabled: mem.mode === 0 && root.swRunning
                                 onClicked: root.lap()
                             }
                         }
