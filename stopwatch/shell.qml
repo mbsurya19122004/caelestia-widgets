@@ -2,7 +2,17 @@
 // Standalone, single-file, plain Quickshell.
 //
 // WHAT CHANGED IN THIS REVISION
-//   - INDEPENDENT MODES: stopwatch and timer now run at the same time, and
+//   - NO MORE MINIMIZE / MAXIMIZE: the collapsed icon, the expand/collapse
+//     animation and the chevron button are gone. The widget is always the full
+//     card. Visibility is controlled only through IPC (see below).
+//   - IPC SHOW/HIDE: the widget exposes an IPC target named "chrono":
+//         qs -c chrono ipc call chrono toggle
+//         qs -c chrono ipc call chrono show
+//         qs -c chrono ipc call chrono hide
+//     Hiding only hides the window; stopwatch, timer and counters keep
+//     running and their state is untouched. The widget starts visible.
+//   - The pin button now means "lock position" (disables dragging).
+//   - (previous) INDEPENDENT MODES: stopwatch and timer run at the same time, and
 //     you can switch between stopwatch / timer / counters freely while either
 //     is running. Each has its own running state; one shared 16 ms clock ticks
 //     while either is active. All time is computed from Date.now() timestamps
@@ -23,12 +33,13 @@
 //   1. Put this file at ~/.config/quickshell/chrono/shell.qml
 //   2. Run:           qs -c chrono
 //   3. Autostart:     exec-once = qs -c chrono        (Hyprland config)
-//   4. Debug/restart: qs -c chrono kill ; qs -c chrono -d
-//   5. Optional blur (namespace is "chrono-widget"):
+//   4. Toggle key:    bind = SUPER, T, exec, qs -c chrono ipc call chrono toggle
+//   5. Debug/restart: qs -c chrono kill ; qs -c chrono -d
+//   6. Optional blur (namespace is "chrono-widget"):
 //        older Hyprland:  layerrule = blur, chrono-widget
 //                         layerrule = ignorezero, chrono-widget
 //        newer Hyprland:  layerrule = blur on, match:namespace chrono-widget
-//   6. Theme: reads ~/.local/state/caelestia/scheme.json if present (live
+//   7. Theme: reads ~/.local/state/caelestia/scheme.json if present (live
 //      reload), otherwise uses the built-in dark palette.
 
 import QtQuick
@@ -427,6 +438,11 @@ ShellRoot {
         readonly property string ringtone: ""
         // ==========================================
 
+        // Whether the widget window is shown. Controlled via IPC (see below).
+        // Hiding only hides the window; every clock and counter keeps its state.
+        property bool shown: true
+        visible: root.shown
+
         // Bottom (not Background): Hyprland does not hand keyboard focus to
         // Background-layer surfaces, so typing in the counter fields needs
         // Bottom or above. Bottom still sits below normal windows.
@@ -440,13 +456,22 @@ ShellRoot {
         anchors { top: true; bottom: true; left: true; right: true }
         mask: Region { item: frame }
 
+        // ---- IPC: qs -c chrono ipc call chrono <toggle|show|hide> ------------
+        IpcHandler {
+            target: "chrono"
+
+            function toggle(): void { root.shown = !root.shown; }
+            function show(): void { root.shown = true; }
+            function hide(): void { root.shown = false; }
+        }
+
         // ---- settings (plain in-memory object; saved to disk on demand) ----
         QtObject {
             id: mem
             property real posX: 60
             property real posY: 60
             property int mode: 0            // 0 = stopwatch, 1 = timer, 2 = counters
-            property bool pinned: false
+            property bool pinned: false     // true = position locked (no dragging)
             property int timerDurationMs: 5 * 60 * 1000
         }
 
@@ -608,7 +633,7 @@ ShellRoot {
             }
         }
 
-        // ---- expand / collapse -------------------------------------------------
+        // ---- running state -----------------------------------------------------
         // Stopwatch and timer run independently of each other and of the
         // currently shown mode.
         property bool swRunning: false
@@ -616,9 +641,6 @@ ShellRoot {
         readonly property bool anyRunning: swRunning || tmRunning
         // running state of whichever mode is currently shown
         readonly property bool modeRunning: mem.mode === 0 ? swRunning : (mem.mode === 1 ? tmRunning : false)
-
-        property bool manualOpen: false
-        property bool expanded: manualOpen || mem.pinned
 
         // ---- stopwatch state ---------------------------------------------------
         property real swStartedAt: 0
@@ -708,7 +730,7 @@ ShellRoot {
         // ---- clock -------------------------------------------------------------
         // One shared ticker; each clock derives its value from Date.now() and
         // its own anchor timestamp, so nothing drifts regardless of tick jitter
-        // or which mode is on screen.
+        // or which mode is on screen (or whether the widget is hidden).
         Timer {
             interval: 16
             running: root.anyRunning
@@ -839,14 +861,14 @@ ShellRoot {
             readonly property int snap: 14    // edge snap distance
             readonly property int pad: 20     // card inner padding
 
-            width: root.expanded ? 340 : 56
-            height: root.expanded ? content.implicitHeight + pad * 2 : 56
-            Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+            width: 340
+            height: content.implicitHeight + pad * 2
+            // smooth growth when the lap list appears / disappears
             Behavior on height { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
 
-            // Displayed position is clamped to the screen, so expanding near an
-            // edge slides the card inwards (and back again when collapsed)
-            // without touching the saved position.
+            // Displayed position is clamped to the screen, so the card never
+            // leaves the visible area when its height changes, without
+            // touching the saved position.
             x: root.width > 0 ? Math.max(gap, Math.min(mem.posX, root.width - width - gap)) : mem.posX
             y: root.height > 0 ? Math.max(gap, Math.min(mem.posY, root.height - height - gap)) : mem.posY
 
@@ -867,11 +889,10 @@ ShellRoot {
             Rectangle {
                 id: card
                 anchors.fill: parent
-                radius: root.expanded ? 26 : height / 2
+                radius: 26
                 color: Qt.rgba(pal.surface.r, pal.surface.g, pal.surface.b, 0.97)
                 border.width: 1
                 border.color: Qt.rgba(pal.primary.r, pal.primary.g, pal.primary.b, 0.10)
-                Behavior on radius { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
 
                 // clicking empty card space drops keyboard focus from text fields
                 MouseArea {
@@ -890,89 +911,11 @@ ShellRoot {
                     }
                 }
 
-                // ---------------- collapsed icon ----------------
-                Item {
-                    anchors.fill: parent
-                    opacity: root.expanded ? 0 : 1
-                    visible: opacity > 0.01
-                    Behavior on opacity { NumberAnimation { duration: 140 } }
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: card.radius
-                        color: pal.primary
-                        opacity: collapsedArea.pressed ? 0.10 : collapsedArea.containsMouse ? 0.08 : 0
-                        Behavior on opacity { NumberAnimation { duration: 100 } }
-                    }
-                    Glyph {
-                        anchors.centerIn: parent
-                        name: mem.mode === 0 ? "stopwatch" : (mem.mode === 1 ? "hourglass" : "counter")
-                        color: pal.primary
-                        size: 24
-                    }
-                    // running indicator (any clock running, or timer in overtime)
-                    Rectangle {
-                        x: 38; y: 9
-                        width: 9; height: 9; radius: 5
-                        color: root.tmFinished ? pal.error : pal.primary
-                        border.width: 2
-                        border.color: pal.surface
-                        visible: root.anyRunning || root.tmFinished
-                        opacity: root.tmFinished ? root.blink : 1
-                        SequentialAnimation on opacity {
-                            running: root.anyRunning && !root.tmFinished
-                            loops: Animation.Infinite
-                            NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutSine }
-                        }
-                    }
-
-                    MouseArea {
-                        id: collapsedArea
-                        anchors.fill: parent
-                        enabled: !root.expanded
-                        hoverEnabled: true
-                        cursorShape: (pressed && travel > 4) ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-
-                        property real pressSX: 0
-                        property real pressSY: 0
-                        property real startX: 0
-                        property real startY: 0
-                        property real travel: 0
-
-                        onPressed: (mouse) => {
-                            var p = mapToItem(null, mouse.x, mouse.y);   // window coords: stable while dragging
-                            pressSX = p.x; pressSY = p.y;
-                            startX = frame.x; startY = frame.y;
-                            travel = 0;
-                        }
-                        onPositionChanged: (mouse) => {
-                            if (!pressed) return;
-                            var p = mapToItem(null, mouse.x, mouse.y);
-                            var dx = p.x - pressSX, dy = p.y - pressSY;
-                            travel = Math.max(travel, Math.abs(dx) + Math.abs(dy));
-                            if (travel > 4) root.setPosition(startX + dx, startY + dy);
-                        }
-                        onReleased: {
-                            if (travel > 4) root.scheduleSave();
-                            else root.manualOpen = true;
-                        }
-                    }
-                }
-
-                // ---------------- expanded panel ----------------
+                // ---------------- panel ----------------
                 Item {
                     id: panel
                     anchors.fill: parent
                     clip: true
-                    opacity: root.expanded ? 1 : 0
-                    visible: opacity > 0.01
-                    Behavior on opacity {
-                        SequentialAnimation {
-                            PauseAnimation { duration: root.expanded ? 90 : 0 }
-                            NumberAnimation { duration: root.expanded ? 160 : 80 }
-                        }
-                    }
 
                     Column {
                         id: content
@@ -1036,6 +979,7 @@ ShellRoot {
                                 anchors.verticalCenter: parent.verticalCenter
                                 spacing: 2
 
+                                // pin = lock position (disables dragging)
                                 IconBtn {
                                     palette: pal
                                     width: 32; height: 32
@@ -1050,18 +994,6 @@ ShellRoot {
                                     kind: "text"
                                     glyph: "swap"; glyphSize: 20
                                     onClicked: root.cycleMode()
-                                }
-                                IconBtn {
-                                    palette: pal
-                                    width: 32; height: 32
-                                    kind: "text"
-                                    glyph: "chevron"; glyphSize: 20
-                                    onClicked: {
-                                        card.forceActiveFocus();
-                                        root.manualOpen = false;
-                                        mem.pinned = false;
-                                        root.scheduleSave();
-                                    }
                                 }
                             }
                         }
