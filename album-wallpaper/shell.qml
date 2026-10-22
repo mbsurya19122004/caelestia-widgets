@@ -18,9 +18,9 @@ import Quickshell.Services.Mpris
  *       caelestia wallpaper -f <art>
  *   - When playback stops/pauses (after a short debounce), restores
  *     the wallpaper you had before.
- *   - When you switch it OFF via IPC, it immediately restores the
- *     wallpaper you had before the song started and stops reacting
- *     to music until switched back ON.
+ *   - When you switch it OFF (or hide it) via IPC, it immediately
+ *     restores the wallpaper you had before the song started and
+ *     stops reacting to music until switched back ON (or shown).
  *
  * PLAYER FILTERING
  *   Only players whose MPRIS identity/desktopEntry matches
@@ -40,6 +40,8 @@ import Quickshell.Services.Mpris
  *   qs -c albumwallpaper ipc call albumwallpaper toggle
  *   qs -c albumwallpaper ipc call albumwallpaper on
  *   qs -c albumwallpaper ipc call albumwallpaper off
+ *   qs -c albumwallpaper ipc call albumwallpaper show     (same as on)
+ *   qs -c albumwallpaper ipc call albumwallpaper hide     (same as off)
  *   qs -c albumwallpaper ipc call albumwallpaper status
  *   (If it's your only quickshell instance, `qs ipc call ...` works too.)
  */
@@ -262,6 +264,8 @@ ShellRoot {
         function toggle(): void { root.enabled = !root.enabled; }
         function on(): void { root.enabled = true; }
         function off(): void { root.enabled = false; }
+        function show(): void { root.enabled = true; }
+        function hide(): void { root.enabled = false; }
         function status(): string { return root.enabled ? "enabled" : "disabled"; }
     }
 }
