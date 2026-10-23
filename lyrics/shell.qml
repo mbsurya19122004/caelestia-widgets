@@ -9,7 +9,8 @@
 //   LRCLIB mostly has line-level timing, so word timing is estimated inside each line;
 //   if a track ships "enhanced LRC" (<mm:ss.xx> word tags) those real timings are used.
 // - Colors follow ~/.local/state/caelestia/scheme.json (live-reloaded).
-// - Position, lock, font, alignment and glow settings persist in ./state.json.
+// - Position, lock, font, alignment and glow settings persist in
+//   ~/.local/state/caelestia-lyrics/state.json (survives restarts and reboots).
 // - Hover the widget: "Aa" opens the style panel, the padlock pins/unpins position.
 //
 // Style panel:
@@ -205,10 +206,23 @@ ShellRoot {
     // ───────────────────────── Persistent state ─────────────────────────
     property bool storeReady: false
 
+    // State lives in the XDG state dir rather than next to shell.qml: the config folder is often a
+    // read-only or symlinked location (dotfile managers, Nix), where saves silently fail and the
+    // position would reset on every restart or reboot.
+    readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/caelestia-lyrics"
+    property bool stateDirReady: false
+
+    Process {
+        command: ["mkdir", "-p", root.stateDir]
+        running: true
+        onExited: root.stateDirReady = true
+    }
+
     FileView {
         id: store
-        path: Quickshell.shellPath("state.json")
+        path: root.stateDirReady ? root.stateDir + "/state.json" : ""
         printErrors: false
+        onSaveFailed: error => console.warn("lyrics: could not save state to", path, "-", error)
         onLoaded: { root.storeReady = true; root.place(); }
         onLoadFailed: error => {
             root.storeReady = true;
@@ -228,11 +242,13 @@ ShellRoot {
             property real glowStrength: 0.95
             property real waveSpread: 1.0
             property int accentMode: 0
+            property string screenName: ""   // output the widget was last placed on
             property int snap: -1     // 0..8 = snapped to one of the 9 anchors, -1 = free position
         }
     }
 
     function persist() {
+        if (win.screen) saved.screenName = win.screen.name;
         saved.posX = widget.x;
         saved.posY = widget.y;
         store.writeAdapter();
@@ -394,6 +410,7 @@ ShellRoot {
         snapAnimating = true;
         snapTimer.restart();
         saved.snap = i;
+        if (win.screen) saved.screenName = win.screen.name;
         widget.x = a.x;
         widget.y = a.y;
         saved.posX = a.x;
@@ -418,11 +435,18 @@ ShellRoot {
                 widget.x = a.x;
                 widget.y = a.y;
             }
-        } else if (snapped && !dragH.active) {
-            // Window/screen size changed: stay glued to the chosen anchor.
-            const a = anchorPos(saved.snap);
-            widget.x = a.x;
-            widget.y = a.y;
+        } else if (!dragH.active) {
+            // Window/screen size changed (common right after login, while outputs are still
+            // coming up at their final size). Re-derive the position from what was saved instead
+            // of keeping whatever the earlier, smaller window had clamped it to.
+            if (snapped) {
+                const a = anchorPos(saved.snap);
+                widget.x = a.x;
+                widget.y = a.y;
+            } else if (saved.posX >= 0 && saved.posY >= 0) {
+                widget.x = saved.posX;
+                widget.y = saved.posY;
+            }
         }
         clampPos();
     }
@@ -785,7 +809,9 @@ ShellRoot {
     // ───────────────────────── Window ─────────────────────────
     PanelWindow {
         id: win
-        screen: Quickshell.screens.find(s => s.name === root.monitor) ?? Quickshell.screens[0]
+        // Prefer the configured monitor, else the one used last time (output order can differ
+        // between login and a manual restart), else the first.
+        screen: Quickshell.screens.find(s => s.name === (root.monitor || saved.screenName)) ?? Quickshell.screens[0]
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
